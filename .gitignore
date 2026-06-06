@@ -1,5 +1,6 @@
 /build/
 /scene.json
+/default.json
 /render.png
 
 .claude

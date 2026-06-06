@@ -9,23 +9,26 @@
 struct ColorStop {
     float pos = 0.0f;
     Vec3 color{1, 1, 1};
+    float alpha = 1.0f;  // per-stop opacity (used by clouds / translucent ramps)
 };
 
 // Sample a color ramp at t in [0,1]. Robust to unsorted stops: lerps between the
 // nearest stop at-or-below t and the nearest at-or-above it. `stops` must be
-// non-empty.
-inline Vec3 sample_color_ramp(const std::vector<ColorStop>& stops, float t) {
+// non-empty. If `out_alpha` is given, the interpolated alpha is written to it.
+inline Vec3 sample_color_ramp(const std::vector<ColorStop>& stops, float t,
+                              float* out_alpha = nullptr) {
     const ColorStop* lo = nullptr;
     const ColorStop* hi = nullptr;
     for (const auto& s : stops) {
         if (s.pos <= t && (!lo || s.pos > lo->pos)) lo = &s;
         if (s.pos >= t && (!hi || s.pos < hi->pos)) hi = &s;
     }
-    if (!lo) return hi->color;  // t before the first stop
-    if (!hi) return lo->color;  // t after the last stop
+    if (!lo) { if (out_alpha) *out_alpha = hi->alpha; return hi->color; }  // before first
+    if (!hi) { if (out_alpha) *out_alpha = lo->alpha; return lo->color; }  // after last
     float span = hi->pos - lo->pos;
-    if (span <= 1e-6f) return lo->color;
+    if (span <= 1e-6f) { if (out_alpha) *out_alpha = lo->alpha; return lo->color; }
     float f = (t - lo->pos) / span;
+    if (out_alpha) *out_alpha = lo->alpha * (1.0f - f) + hi->alpha * f;
     return lo->color * (1.0f - f) + hi->color * f;
 }
 
@@ -39,12 +42,25 @@ struct Atmosphere {
     float intensity = 1.0f;         // overall strength
 };
 
+// A second, translucent texture layer for spheres — fbm cloud cover composited
+// over the base surface at the same hit point (no extra ray). The fbm field maps
+// through `ramp` (color + per-stop alpha); an empty ramp = white, alpha = field.
+struct Clouds {
+    bool  enabled = false;
+    float scale = 4.0f;          // fbm frequency (independent of the base texture)
+    int   octaves = 4;
+    float coverage = 0.5f;       // biases the field: <0.5 sparse, >0.5 more cloud
+    float opacity = 1.0f;        // overall alpha multiplier
+    std::vector<ColorStop> ramp; // field -> (color, alpha)
+};
+
 // Phase 1 / 3.4: Minimal material — no PBR, just what the pixel-art shading needs.
 // Phase 9: an optional procedural surface pattern that mixes `albedo` with
 // `detail` across the sphere, so self-rotation becomes visible.
 struct Material {
     Vec3 albedo;
     bool emissive = false;  // if true, shading ignores lighting/shadows (sun, self-lit bodies)
+    bool two_sided = false; // if true, lit when the sun hits either face (rings read as translucent)
 
     int pattern = 0;        // 0 = solid (texture off); nonzero = procedural texture on
     Vec3 detail{0, 0, 0};   // fallback mix color when tex_ramp is empty
@@ -64,4 +80,5 @@ struct Material {
     std::vector<ColorStop> tex_ramp; // colors the field maps through
 
     Atmosphere atmosphere;           // Stage 6: faked limb glow
+    Clouds clouds;                   // second translucent texture layer (spheres)
 };

@@ -85,6 +85,8 @@ struct Editor {
     bool show_orbits = true;  // orbit-path overlays in the edit view (hidden through camera)
     ShadeMode shade_mode = ShadeMode::Lit;  // viewport display mode (export is always Lit)
 
+    char scene_file[128] = "scene.json";  // Save/Load target (editable in the File menu)
+
     GLuint tex = 0;
     std::vector<uint32_t> pixels;
 
@@ -401,6 +403,9 @@ void ramp_editor(std::vector<ColorStop>& ramp, Vec3 add_color) {
         ImGui::SameLine();
         ImGui::ColorEdit3("##col", &ramp[k].color.x, ImGuiColorEditFlags_NoInputs);
         ImGui::SameLine();
+        ImGui::SetNextItemWidth(70.0f);
+        ImGui::SliderFloat("A", &ramp[k].alpha, 0.0f, 1.0f);
+        ImGui::SameLine();
         if (ImGui::SmallButton("X")) remove = k;
         ImGui::PopID();
     }
@@ -450,6 +455,17 @@ void draw_object_tab(Editor& ed) {
             ImGui::SeparatorText("Surface colors");
             ramp_editor(m.tex_ramp, m.albedo);
             if (m.tex_ramp.empty()) ImGui::ColorEdit3("Detail", &m.detail.x);
+        }
+        ImGui::SeparatorText("Clouds");
+        Clouds& cl = m.clouds;
+        ImGui::Checkbox("Has clouds", &cl.enabled);
+        if (cl.enabled) {
+            ImGui::SliderFloat("Cloud scale", &cl.scale, 0.5f, 16.0f);
+            ImGui::SliderInt("Cloud octaves", &cl.octaves, 1, 8);
+            ImGui::SliderFloat("Coverage", &cl.coverage, 0.0f, 1.0f);
+            ImGui::SliderFloat("Cloud opacity", &cl.opacity, 0.0f, 1.0f);
+            ImGui::TextDisabled("Color + alpha ramp (empty = solid white)");
+            ramp_editor(cl.ramp, Vec3(1, 1, 1));
         }
         ImGui::SeparatorText("Atmosphere");
         ImGui::Checkbox("Has atmosphere", &m.atmosphere.enabled);
@@ -527,12 +543,20 @@ void draw_stylize_tab(Editor& ed) {
     ImGui::Combo("Anchors", &pp.anchor_count, anchors, 3);
     if (pp.anchor_count >= 1) ImGui::ColorEdit3("Base A", &pp.base_a.x);
     if (pp.anchor_count >= 2) ImGui::ColorEdit3("Base B", &pp.base_b.x);
+    ImGui::SliderFloat("Base hue", &pp.base_hue, 0.0f, 1.0f);
     ImGui::SliderInt("Palette size", &pp.palette_size, 2, 32);
     ImGui::SliderFloat("Randomness", &pp.randomness, 0.0f, 1.0f);
     ImGui::InputInt("Palette seed", &pp.palette_seed);
     if (ImGui::Button("Generate palette")) generate_palette(pp);
     ImGui::SameLine();
-    if (ImGui::Button("Randomize")) { pp.palette_seed++; generate_palette(pp); }
+    // Randomize: walk the base hue by the golden ratio (well-spread distinct hues)
+    // and bump the seed, so it visibly varies in every anchor mode.
+    if (ImGui::Button("Randomize")) {
+        pp.palette_seed++;
+        pp.base_hue += 0.61803398f;
+        if (pp.base_hue >= 1.0f) pp.base_hue -= 1.0f;
+        generate_palette(pp);
+    }
 
     int rm = -1;
     for (int k = 0; k < static_cast<int>(pp.palette.size()); ++k) {
@@ -602,6 +626,7 @@ void add_ring(Editor& ed) {
     auto ring = std::make_shared<Disk>(ed.cam.target, Vec3(0, 1, 0), 1.5f, 3.0f,
                                        Material{Vec3(0.7f, 0.6f, 0.5f), false});
     ring->name = "Ring";
+    ring->material.two_sided = true;  // lit from either face — reads as translucent
     Body body{ring};
 
     // If a sphere is selected, size the ring to it (1.2x / 1.4x its radius), sit it
@@ -660,14 +685,19 @@ void draw_menu_bar(Editor& ed) {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("File")) {
-            if (ImGui::MenuItem("Save")) save_scene(ed.scene, "scene.json");
+            ImGui::SetNextItemWidth(160);
+            ImGui::InputText("File", ed.scene_file, sizeof(ed.scene_file));
+            if (ImGui::MenuItem("Save")) save_scene(ed.scene, ed.scene_file);
             if (ImGui::MenuItem("Load")) {
                 Scene loaded;
-                if (load_scene(loaded, "scene.json")) {
+                if (load_scene(loaded, ed.scene_file)) {
                     ed.scene = loaded;
                     ed.selected = -1;
                 }
             }
+            ImGui::Separator();
+            // Save the current scene as the startup default (loaded on next launch).
+            if (ImGui::MenuItem("Set as default")) save_scene(ed.scene, "default.json");
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
@@ -1006,7 +1036,8 @@ int main() {
     ImGui_ImplOpenGL3_Init("#version 130");
 
     Editor ed;
-    ed.scene = make_default_scene();
+    // Load the user's saved default if present, else the built-in starter scene.
+    if (!load_scene(ed.scene, "default.json")) ed.scene = make_default_scene();
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
