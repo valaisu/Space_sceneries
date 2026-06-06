@@ -111,7 +111,8 @@ json to_json(const Background& b) {
     return json{{"sky", to_json(b.sky)}, {"density", b.density},
                 {"brightness", b.brightness}, {"size", b.size},
                 {"tint", to_json(b.tint)}, {"color_variation", b.color_variation},
-                {"seed", b.seed}};
+                {"seed", b.seed}, {"region_scale", b.region_scale},
+                {"region_strength", b.region_strength}, {"region_glow", b.region_glow}};
 }
 
 Background background_from_json(const json& j) {
@@ -123,6 +124,9 @@ Background background_from_json(const json& j) {
     if (j.contains("tint")) b.tint = vec3_from_json(j.at("tint"));
     b.color_variation = j.value("color_variation", b.color_variation);
     b.seed = j.value("seed", b.seed);
+    b.region_scale = j.value("region_scale", b.region_scale);
+    b.region_strength = j.value("region_strength", b.region_strength);
+    b.region_glow = j.value("region_glow", b.region_glow);
     return b;
 }
 
@@ -132,7 +136,9 @@ json to_json(const PostProcess& p) {
     return json{{"enabled", p.enabled}, {"palette", pal},
                 {"base_a", to_json(p.base_a)}, {"base_b", to_json(p.base_b)},
                 {"palette_size", p.palette_size}, {"blur_radius", p.blur_radius},
-                {"dither", static_cast<int>(p.dither)}, {"iterations", p.iterations}};
+                {"dither", static_cast<int>(p.dither)}, {"iterations", p.iterations},
+                {"anchor_count", p.anchor_count}, {"randomness", p.randomness},
+                {"palette_seed", p.palette_seed}};
 }
 
 PostProcess post_from_json(const json& j) {
@@ -148,6 +154,9 @@ PostProcess post_from_json(const json& j) {
     p.blur_radius = j.value("blur_radius", p.blur_radius);
     p.dither = static_cast<DitherMode>(j.value("dither", static_cast<int>(p.dither)));
     p.iterations = j.value("iterations", p.iterations);
+    p.anchor_count = j.value("anchor_count", p.anchor_count);
+    p.randomness = j.value("randomness", p.randomness);
+    p.palette_seed = j.value("palette_seed", p.palette_seed);
     return p;
 }
 

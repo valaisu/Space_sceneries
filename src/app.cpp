@@ -82,10 +82,15 @@ struct Editor {
     float play_speed = 1.0f;
     OrbitCam cam;
     bool look_through_camera = false;
+    bool show_orbits = true;  // orbit-path overlays in the edit view (hidden through camera)
     ShadeMode shade_mode = ShadeMode::Lit;  // viewport display mode (export is always Lit)
 
     GLuint tex = 0;
     std::vector<uint32_t> pixels;
+
+    // Neutral-light preview thumbnails (material in the Object tab, sky in World).
+    GLuint mat_tex = 0, bg_tex = 0;
+    std::vector<uint32_t> mat_px, bg_px;
 
     // Active modal transform + the snapshot taken when it began (for cancel).
     XMode xmode = XMode::None;
@@ -149,16 +154,19 @@ int pick_body(const Editor& ed, const Ray& ray) {
 }
 
 // ---- GL texture for the viewport image ------------------------------------
-void upload_texture(Editor& ed, int w, int h) {
-    if (ed.tex == 0)
-        glGenTextures(1, &ed.tex);
-    glBindTexture(GL_TEXTURE_2D, ed.tex);
+void upload_rgba(GLuint& tex, int w, int h, const std::vector<uint32_t>& px) {
+    if (tex == 0)
+        glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                 ed.pixels.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+}
+
+void upload_texture(Editor& ed, int w, int h) {
+    upload_rgba(ed.tex, w, h, ed.pixels);
 }
 
 // ---- Viewport overlays -----------------------------------------------------
@@ -314,13 +322,16 @@ void draw_axis_gizmo(ImDrawList* dl, const Camera& cam, ImVec2 corner) {
 // Shared Orbit editor used by both bodies and the camera. `exclude` is a body
 // index to omit from the parent picker (a body can't orbit itself); -1 excludes none.
 void orbit_controls(Orbit& orbit, const std::vector<Body>& bodies, int exclude) {
-    ImGui::SeparatorText("Orbit");
+    // A radius-0 active orbit is a pure attachment (e.g. a ring tracking its planet):
+    // it has no orbit geometry, so Radius/Period/Phase/Normal are meaningless.
+    const bool attached = orbit.active && orbit.radius == 0.0f;
+    ImGui::SeparatorText(attached ? "Attachment" : "Orbit");
     ImGui::Checkbox("Orbiting", &orbit.active);
     if (!orbit.active) return;
     const char* cur = (orbit.parent < 0 || orbit.parent >= static_cast<int>(bodies.size()))
                           ? "(origin)"
                           : bodies[orbit.parent].shape->name.c_str();
-    if (ImGui::BeginCombo("Parent", cur)) {
+    if (ImGui::BeginCombo(attached ? "Attached to" : "Parent", cur)) {
         if (ImGui::Selectable("(origin)", orbit.parent < 0)) orbit.parent = -1;
         for (int i = 0; i < static_cast<int>(bodies.size()); ++i) {
             if (i == exclude) continue;
@@ -328,6 +339,11 @@ void orbit_controls(Orbit& orbit, const std::vector<Body>& bodies, int exclude) 
                 orbit.parent = i;
         }
         ImGui::EndCombo();
+    }
+    if (attached) {
+        ImGui::TextDisabled("Tracks parent's position (no orbit).");
+        if (ImGui::SmallButton("Make it orbit")) orbit.radius = 5.0f;
+        return;
     }
     ImGui::DragFloat("Orbit Radius", &orbit.radius, 0.1f, 0.0f, 1000.0f);
     ImGui::DragFloat("Period (s)", &orbit.period, 0.1f, 0.01f, 100000.0f);
@@ -386,60 +402,15 @@ void ramp_editor(std::vector<ColorStop>& ramp, Vec3 add_color) {
         ramp.push_back({ramp.empty() ? 0.0f : 1.0f, add_color});
 }
 
-void draw_properties(Editor& ed) {
-    ImGui::Begin("Properties", nullptr, PANEL_FLAGS);
+// Object tab: the selected body (or camera), else a hint.
+void draw_object_tab(Editor& ed) {
     if (ed.selected == SEL_CAMERA) {
         draw_camera_properties(ed);
-        ImGui::End();
         return;
     }
     if (ed.selected < 0 || ed.selected >= static_cast<int>(ed.scene.bodies.size())) {
         ImGui::TextWrapped("Nothing selected. Click an object in the viewport, "
                            "or use the Add menu to create one.");
-        ImGui::SeparatorText("Lighting");
-        ImGui::TextWrapped("Suns (emissive bodies) light the scene in Lit mode.");
-        ImGui::DragFloat3("Fill light dir", &ed.scene.light_dir.x, 0.05f);
-        ImGui::Checkbox("Include fill in Lit", &ed.scene.fill_light);
-        ImGui::Checkbox("Sun distance falloff", &ed.scene.light_falloff);
-
-        Background& bg = ed.scene.background;
-        ImGui::SeparatorText("Background (starfield)");
-        ImGui::ColorEdit3("Sky", &bg.sky.x);
-        ImGui::SliderFloat("Density", &bg.density, 0.0f, 1.0f);
-        ImGui::SliderFloat("Brightness", &bg.brightness, 0.0f, 4.0f);
-        ImGui::SliderFloat("Star size", &bg.size, 0.01f, 0.5f);
-        ImGui::ColorEdit3("Star tint", &bg.tint.x);
-        ImGui::SliderFloat("Color variation", &bg.color_variation, 0.0f, 1.0f);
-        ImGui::InputInt("Seed", &bg.seed);
-
-        PostProcess& pp = ed.scene.post;
-        ImGui::SeparatorText("Stylize (palette post-process)");
-        ImGui::Checkbox("Enabled", &pp.enabled);
-        ImGui::ColorEdit3("Base A", &pp.base_a.x);
-        ImGui::ColorEdit3("Base B", &pp.base_b.x);
-        ImGui::SliderInt("Palette size", &pp.palette_size, 2, 32);
-        if (ImGui::Button("Generate palette")) generate_palette(pp);
-
-        int rm = -1;
-        for (int k = 0; k < static_cast<int>(pp.palette.size()); ++k) {
-            ImGui::PushID(k);
-            ImGui::ColorEdit3("##sw", &pp.palette[k].x, ImGuiColorEditFlags_NoInputs);
-            ImGui::SameLine();
-            if (ImGui::SmallButton("X")) rm = k;
-            if ((k % 6) != 5 && k + 1 < static_cast<int>(pp.palette.size()))
-                ImGui::SameLine();
-            ImGui::PopID();
-        }
-        if (rm >= 0) pp.palette.erase(pp.palette.begin() + rm);
-        if (ImGui::SmallButton("Add swatch")) pp.palette.push_back(Vec3(1, 1, 1));
-
-        ImGui::SliderFloat("Blur radius", &pp.blur_radius, 0.0f, 5.0f);
-        const char* dither[] = {"None", "Ordered (Bayer)", "Random"};
-        int dm = static_cast<int>(pp.dither);
-        if (ImGui::Combo("Dither", &dm, dither, 3)) pp.dither = static_cast<DitherMode>(dm);
-        ImGui::SliderInt("Iterations", &pp.iterations, 1, 4);
-
-        ImGui::End();
         return;
     }
 
@@ -481,6 +452,12 @@ void draw_properties(Editor& ed) {
             ImGui::SliderFloat("Thickness", &m.atmosphere.thickness, 0.0f, 1.0f);
             ImGui::SliderFloat("Intensity", &m.atmosphere.intensity, 0.0f, 3.0f);
         }
+        ImGui::SeparatorText("Preview (neutral light)");
+        constexpr int PW = 140;
+        render_material_preview(m, PW, PW, ed.mat_px);
+        upload_rgba(ed.mat_tex, PW, PW, ed.mat_px);
+        ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(ed.mat_tex)),
+                     ImVec2(PW, PW));
     } else if (auto d = std::dynamic_pointer_cast<Disk>(obj)) {
         ImGui::TextUnformatted("Ring");
         if (!orbiting) ImGui::DragFloat3("Position", &d->center.x, 0.1f);
@@ -501,7 +478,83 @@ void draw_properties(Editor& ed) {
     ImGui::SeparatorText("Spin (visible once textured)");
     ImGui::DragFloat3("Spin Axis", &body.spin.axis.x, 0.05f);
     ImGui::DragFloat("Spin Period (s)", &body.spin.period, 0.1f);
+}
 
+// World tab: scene-global lighting + background starfield.
+void draw_world_tab(Editor& ed) {
+    ImGui::SeparatorText("Lighting");
+    ImGui::TextWrapped("Suns (emissive bodies) light the scene in Lit mode.");
+    ImGui::DragFloat3("Fill light dir", &ed.scene.light_dir.x, 0.05f);
+    ImGui::Checkbox("Include fill in Lit", &ed.scene.fill_light);
+    ImGui::Checkbox("Sun distance falloff", &ed.scene.light_falloff);
+
+    Background& bg = ed.scene.background;
+    ImGui::SeparatorText("Background (starfield)");
+    ImGui::ColorEdit3("Sky", &bg.sky.x);
+    ImGui::SliderFloat("Density", &bg.density, 0.0f, 1.0f);
+    ImGui::SliderFloat("Brightness", &bg.brightness, 0.0f, 4.0f);
+    ImGui::SliderFloat("Star size", &bg.size, 0.01f, 0.5f);
+    ImGui::ColorEdit3("Star tint", &bg.tint.x);
+    ImGui::SliderFloat("Color variation", &bg.color_variation, 0.0f, 1.0f);
+    ImGui::InputInt("Seed", &bg.seed);
+
+    ImGui::SeparatorText("Density regions");
+    ImGui::SliderFloat("Region scale", &bg.region_scale, 0.2f, 8.0f);
+    ImGui::SliderFloat("Region strength", &bg.region_strength, 0.0f, 1.0f);
+    ImGui::SliderFloat("Region glow", &bg.region_glow, 0.0f, 0.3f);
+
+    ImGui::SeparatorText("Preview");
+    constexpr int PW = 224, PH = 126;
+    render_background_preview(bg, PW, PH, ed.bg_px);
+    upload_rgba(ed.bg_tex, PW, PH, ed.bg_px);
+    ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(ed.bg_tex)), ImVec2(PW, PH));
+}
+
+// Stylize tab: palette post-process.
+void draw_stylize_tab(Editor& ed) {
+    PostProcess& pp = ed.scene.post;
+    ImGui::Checkbox("Enabled", &pp.enabled);
+
+    ImGui::SeparatorText("Generate");
+    const char* anchors[] = {"None (random)", "One color", "Two colors"};
+    ImGui::Combo("Anchors", &pp.anchor_count, anchors, 3);
+    if (pp.anchor_count >= 1) ImGui::ColorEdit3("Base A", &pp.base_a.x);
+    if (pp.anchor_count >= 2) ImGui::ColorEdit3("Base B", &pp.base_b.x);
+    ImGui::SliderInt("Palette size", &pp.palette_size, 2, 32);
+    ImGui::SliderFloat("Randomness", &pp.randomness, 0.0f, 1.0f);
+    ImGui::InputInt("Palette seed", &pp.palette_seed);
+    if (ImGui::Button("Generate palette")) generate_palette(pp);
+    ImGui::SameLine();
+    if (ImGui::Button("Randomize")) { pp.palette_seed++; generate_palette(pp); }
+
+    int rm = -1;
+    for (int k = 0; k < static_cast<int>(pp.palette.size()); ++k) {
+        ImGui::PushID(k);
+        ImGui::ColorEdit3("##sw", &pp.palette[k].x, ImGuiColorEditFlags_NoInputs);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X")) rm = k;
+        if ((k % 6) != 5 && k + 1 < static_cast<int>(pp.palette.size()))
+            ImGui::SameLine();
+        ImGui::PopID();
+    }
+    if (rm >= 0) pp.palette.erase(pp.palette.begin() + rm);
+    if (ImGui::SmallButton("Add swatch")) pp.palette.push_back(Vec3(1, 1, 1));
+
+    ImGui::SliderFloat("Blur radius", &pp.blur_radius, 0.0f, 5.0f);
+    const char* dither[] = {"None", "Ordered (Bayer)", "Random"};
+    int dm = static_cast<int>(pp.dither);
+    if (ImGui::Combo("Dither", &dm, dither, 3)) pp.dither = static_cast<DitherMode>(dm);
+    ImGui::SliderInt("Iterations", &pp.iterations, 1, 4);
+}
+
+void draw_properties(Editor& ed) {
+    ImGui::Begin("Properties", nullptr, PANEL_FLAGS);
+    if (ImGui::BeginTabBar("PropTabs")) {
+        if (ImGui::BeginTabItem("Object")) { draw_object_tab(ed); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("World")) { draw_world_tab(ed); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Stylize")) { draw_stylize_tab(ed); ImGui::EndTabItem(); }
+        ImGui::EndTabBar();
+    }
     ImGui::End();
 }
 
@@ -582,7 +635,8 @@ void draw_menu_bar(Editor& ed) {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("View")) {
-            ImGui::MenuItem("Look through camera", "Numpad 0", &ed.look_through_camera);
+            ImGui::MenuItem("Look through camera", "0", &ed.look_through_camera);
+            ImGui::MenuItem("Show orbits", nullptr, &ed.show_orbits);
             if (ImGui::BeginMenu("Display mode")) {
                 int m = static_cast<int>(ed.shade_mode);
                 if (ImGui::RadioButton("Direction (flat directional)", &m, 0))
@@ -710,13 +764,20 @@ void update_transform(Editor& ed, const Camera& cam, const ScreenMap& map,
             d->outer_radius = std::max(0.01f, ed.x_outer * f);
         }
     } else if (ed.xmode == XMode::Rotate) {
-        float a0 = std::atan2(ed.x_start_mouse.y - cscr.y, ed.x_start_mouse.x - cscr.x);
-        float a1 = std::atan2(mouse.y - cscr.y, mouse.x - cscr.x);
-        Vec3 axis = cam.forward();  // rotate about the view axis
-        if (auto d = std::dynamic_pointer_cast<Disk>(b.shape)) {
-            d->normal = rotate_about(ed.x_normal, axis, a1 - a0);
+        // Trackball: horizontal drag tilts about the view's up axis, vertical drag
+        // about its right axis. Works from any view (a flat ring viewed top-down,
+        // whose normal points along the old view-axis, now still tilts).
+        const float k = 0.01f;  // radians per pixel
+        float dxr = (mouse.x - ed.x_start_mouse.x) * k;
+        float dyr = (mouse.y - ed.x_start_mouse.y) * k;
+        auto trackball = [&](Vec3 v) {
+            v = rotate_about(v, cam.up(), dxr);
+            return rotate_about(v, cam.right(), dyr);
+        };
+        if (auto disk = std::dynamic_pointer_cast<Disk>(b.shape)) {
+            disk->normal = trackball(ed.x_normal);
         } else {
-            b.spin.axis = rotate_about(ed.x_spin, axis, a1 - a0);  // sphere: spin axis (stored)
+            b.spin.axis = trackball(ed.x_spin);  // sphere: spin axis (stored)
         }
     }
 }
@@ -755,11 +816,14 @@ void draw_viewport(Editor& ed) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     // Orbit overlays (selected brighter), then the selection outline on top.
+    // Orbits are an edit-view aid: hidden through the render camera, or by the toggle.
     World posed = world_at_time(ed.scene, ed.time);
-    for (int i = 0; i < static_cast<int>(ed.scene.bodies.size()); ++i) {
-        if (!ed.scene.bodies[i].orbit.active) continue;
-        draw_orbit(dl, map, ed.scene, i, ed.time, i == ed.selected ? COL_ORBIT_SEL : COL_ORBIT);
-    }
+    const bool show_orbits = ed.show_orbits && !ed.look_through_camera;
+    if (show_orbits)
+        for (int i = 0; i < static_cast<int>(ed.scene.bodies.size()); ++i) {
+            if (!ed.scene.bodies[i].orbit.active) continue;
+            draw_orbit(dl, map, ed.scene, i, ed.time, i == ed.selected ? COL_ORBIT_SEL : COL_ORBIT);
+        }
     bool sel_body = ed.selected >= 0 && ed.selected < static_cast<int>(posed.size());
     if (sel_body) {
         Body posed_body = ed.scene.bodies[ed.selected];
@@ -771,7 +835,7 @@ void draw_viewport(Editor& ed) {
     // view-pivot markers, and a corner axis indicator. None of this is raytraced.
     bool sel_cam = ed.selected == SEL_CAMERA && !ed.look_through_camera;
     if (!ed.look_through_camera) {
-        if (ed.scene.cam.orbit.active)
+        if (ed.show_orbits && ed.scene.cam.orbit.active)
             draw_camera_orbit(dl, map, ed.scene, ed.time,
                               sel_cam ? COL_ORBIT_SEL : COL_ORBIT);
         draw_camera_gizmo(dl, map, ed.scene, ed.time, sel_cam ? COL_OUTLINE : COL_CAMERA);
@@ -785,6 +849,8 @@ void draw_viewport(Editor& ed) {
     ImGuiIO& io = ImGui::GetIO();
     if (ed.xmode == XMode::None && hovered && !io.WantTextInput) {
         if (ImGui::IsKeyPressed(ImGuiKey_Space)) ed.playing = !ed.playing;
+        if (ImGui::IsKeyPressed(ImGuiKey_0) || ImGui::IsKeyPressed(ImGuiKey_Keypad0))
+            ed.look_through_camera = !ed.look_through_camera;
 
         // Edit-camera view controls (distinct from the render camera).
         if (!ed.look_through_camera) {
@@ -939,6 +1005,8 @@ int main() {
     }
 
     if (ed.tex) glDeleteTextures(1, &ed.tex);
+    if (ed.mat_tex) glDeleteTextures(1, &ed.mat_tex);
+    if (ed.bg_tex) glDeleteTextures(1, &ed.bg_tex);
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();

@@ -26,6 +26,12 @@ struct PostProcess {
     Vec3 base_b{0.96f, 0.86f, 0.66f};  // light / warm
     int palette_size = 8;
 
+    // How many of the base colors anchor generation: 2 = base_a -> base_b ramp
+    // (classic), 1 = ramp around base_a's hue, 0 = a fully seed-chosen hue pair.
+    int anchor_count = 2;
+    float randomness = 0.0f;  // 0 = deterministic ramp; >0 jitters each swatch in HSV
+    int palette_seed = 0;     // PRNG seed; bump it (Randomize) for a new variation
+
     float blur_radius = 1.0f;          // box-blur radius in px (0 = no blur)
     DitherMode dither = DitherMode::Ordered;
     int iterations = 1;                // repeat the blur+quantize pass N times
