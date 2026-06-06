@@ -1,0 +1,35 @@
+# Space Sceneries
+
+![A rendered space scene: pixel-art planets and moons over a starfield](docs/preview.png)
+
+A from-scratch C++ raytracer with a **Blender-style scene editor** for composing
+simplified, pixel-art space scenes and exporting them as PNGs. You arrange bodies in
+a live viewport, light them with emissive suns, and a palette post-process crushes
+the final image toward deliberate pixel-art color.
+
+## What you can make
+
+- **Planets and moons** — spheres with procedural 3D textures (fbm noise, warped
+  latitude bands for gas giants), translucent **cloud** layers, and Fresnel-limb
+  **atmospheres**.
+- **Rings** — translucent annular disks with radial color ramps, lit from either face.
+- **Suns** — emissive bodies that act as the scene's lights (with hard shadows and
+  optional inverse-square falloff).
+- **Starfields** — seeded backgrounds with denser and sparser regions.
+- **Motion** — circular orbits and spin, scrubbable on a timeline so scenes animate.
+- **A pixel-art look** — generated HSV palettes with dithering, applied identically
+  to the viewport and the exported PNG.
+
+## Build & run
+
+GLFW and OpenGL come from the system; `nlohmann/json`, Dear ImGui, and
+`stb_image_write` are vendored in `third_party/`.
+
+```bash
+cmake -S . -B build        # first time / after CMakeLists or file-list changes
+cmake --build build -j     # after editing code
+./build/space_sceneries          # the editor (needs a display)
+./build/space_sceneries_tests    # headless sanity checks
+```
+
+`scene.json` and `render.png` are written to the working directory.
