@@ -96,6 +96,28 @@ Spin spin_from_json(const json& j) {
     return s;
 }
 
+json to_json(const SceneCamera& c) {
+    return json{{"position", to_json(c.position)}, {"orbit", to_json(c.orbit)},
+                {"vup", to_json(c.vup)}, {"fov", c.fov},
+                {"look", static_cast<int>(c.look)}, {"direction", to_json(c.direction)},
+                {"target", c.target}, {"spin_period", c.spin_period},
+                {"spin_phase", c.spin_phase}};
+}
+
+SceneCamera camera_from_json(const json& j) {
+    SceneCamera c;
+    if (j.contains("position")) c.position = vec3_from_json(j.at("position"));
+    if (j.contains("orbit")) c.orbit = orbit_from_json(j.at("orbit"));
+    if (j.contains("vup")) c.vup = vec3_from_json(j.at("vup"));
+    c.fov = j.value("fov", 50.0f);
+    c.look = static_cast<CamLook>(j.value("look", static_cast<int>(CamLook::Target)));
+    if (j.contains("direction")) c.direction = vec3_from_json(j.at("direction"));
+    c.target = j.value("target", -1);
+    c.spin_period = j.value("spin_period", 0.0f);
+    c.spin_phase = j.value("spin_phase", 0.0f);
+    return c;
+}
+
 json body_to_json(const Body& b) {
     return json{{"shape", object_to_json(b.shape)},
                 {"orbit", to_json(b.orbit)},
@@ -135,10 +157,7 @@ std::string scene_to_json(const Scene& scene) {
         bodies.push_back(body_to_json(b));
 
     json j{
-        {"camera", {{"lookfrom", to_json(scene.cam_lookfrom)},
-                    {"lookat", to_json(scene.cam_lookat)},
-                    {"vup", to_json(scene.cam_vup)},
-                    {"fov", scene.cam_fov}}},
+        {"camera", to_json(scene.cam)},
         {"light_dir", to_json(scene.light_dir)},
         {"resolution", {{"width", scene.width}, {"height", scene.height}}},
         {"bodies", bodies},
@@ -150,11 +169,7 @@ Scene scene_from_json(const std::string& text) {
     json j = json::parse(text);
     Scene scene;
 
-    const json& cam = j.at("camera");
-    scene.cam_lookfrom = vec3_from_json(cam.at("lookfrom"));
-    scene.cam_lookat = vec3_from_json(cam.at("lookat"));
-    scene.cam_vup = vec3_from_json(cam.at("vup"));
-    scene.cam_fov = cam.at("fov").get<float>();
+    scene.cam = camera_from_json(j.at("camera"));
 
     scene.light_dir = vec3_from_json(j.at("light_dir"));
 
@@ -186,6 +201,42 @@ Vec3 body_world_pos_rec(const Scene& scene, int i, float t, int depth) {
 
 Vec3 body_world_pos(const Scene& scene, int i, float t) {
     return body_world_pos_rec(scene, i, t, static_cast<int>(scene.bodies.size()));
+}
+
+Vec3 camera_eye(const Scene& scene, float t) {
+    const SceneCamera& c = scene.cam;
+    if (!c.orbit.active) return c.position;
+    Vec3 base(0, 0, 0);
+    int p = c.orbit.parent;
+    if (p >= 0 && p < static_cast<int>(scene.bodies.size()))
+        base = body_world_pos(scene, p, t);
+    return base + orbit_offset(c.orbit, t);
+}
+
+Camera scene_camera(const Scene& scene, float t, float aspect) {
+    const SceneCamera& c = scene.cam;
+    Vec3 eye = camera_eye(scene, t);
+    Vec3 at;
+    switch (c.look) {
+        case CamLook::Direction:
+            at = eye + normalize(c.direction);
+            break;
+        case CamLook::Target: {
+            Vec3 tgt(0, 0, 0);
+            if (c.target >= 0 && c.target < static_cast<int>(scene.bodies.size()))
+                tgt = body_world_pos(scene, c.target, t);
+            at = tgt;
+            break;
+        }
+        case CamLook::Spin: {
+            constexpr float TWO_PI = 6.28318530717958647692f;
+            float w = (c.spin_period != 0.0f) ? (TWO_PI / c.spin_period) : 0.0f;
+            Vec3 dir = rotate_about(Vec3(0, 0, -1), c.vup, c.spin_phase + w * t);
+            at = eye + dir;
+            break;
+        }
+    }
+    return Camera(eye, at, c.vup, c.fov, aspect);
 }
 
 World world_at_time(const Scene& scene, float t) {
