@@ -157,13 +157,17 @@ Vec3 ray_color(const Ray& r, const World& world, const std::vector<Light>& light
             }
         }
 
-        float diffuse = std::max(0.0f, dot(rec.normal, to_light));
+        // Two-sided surfaces (rings) are lit when the sun hits either face.
+        float ndl = dot(rec.normal, to_light);
+        float diffuse = rec.material.two_sided ? std::fabs(ndl) : std::max(0.0f, ndl);
         if (diffuse <= 0.0f) continue;
 
         if (shadows) {
             // Only opaque bodies cast shadows; emissive bodies (the suns, including
             // the light's own sphere at max_dist) are transparent to shadow rays.
-            Ray shadow(rec.p + rec.normal * EPS, to_light);
+            // Offset toward the lit face so a back-lit two-sided surface doesn't self-shadow.
+            Vec3 soff = (rec.material.two_sided && ndl < 0.0f) ? -rec.normal : rec.normal;
+            Ray shadow(rec.p + soff * EPS, to_light);
             HitRecord occ;
             if (hit_world(world, shadow, EPS, max_dist - EPS, occ) && !occ.material.emissive)
                 continue;

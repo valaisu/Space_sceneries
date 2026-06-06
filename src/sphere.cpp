@@ -91,5 +91,18 @@ bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
         Vec3 ln = rotate_about(rec.normal, spin_axis, -spin_angle);
         rec.material.albedo = surface_color(material, surface_field(material, ln));
     }
+    // Cloud layer: a second translucent fbm texture composited over the base.
+    if (material.clouds.enabled) {
+        const Clouds& cl = material.clouds;
+        Vec3 ln = rotate_about(rec.normal, spin_axis, -spin_angle);
+        float f = std::clamp(fbm3(ln * cl.scale, cl.octaves) + (cl.coverage - 0.5f),
+                             0.0f, 1.0f);
+        float a;
+        Vec3 cc;
+        if (cl.ramp.empty()) { cc = Vec3(1, 1, 1); a = f; }
+        else cc = sample_color_ramp(cl.ramp, f, &a);
+        a = std::clamp(a * cl.opacity, 0.0f, 1.0f);
+        rec.material.albedo = rec.material.albedo * (1.0f - a) + cc * a;
+    }
     return true;
 }

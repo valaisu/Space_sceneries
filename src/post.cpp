@@ -153,6 +153,9 @@ void generate_palette(PostProcess& pp) {
     if (dh > 0.5f) dh -= 1.0f;
     if (dh < -0.5f) dh += 1.0f;
 
+    // Rotate the whole ramp to the chosen base hue (recenters it on any color).
+    a.x += pp.base_hue;
+
     const float r = std::max(0.0f, pp.randomness);
     for (int i = 0; i < n; ++i) {
         float t = (n == 1) ? 0.0f : static_cast<float>(i) / (n - 1);

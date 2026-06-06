@@ -29,6 +29,7 @@ struct PostProcess {
     // How many of the base colors anchor generation: 2 = base_a -> base_b ramp
     // (classic), 1 = ramp around base_a's hue, 0 = a fully seed-chosen hue pair.
     int anchor_count = 2;
+    float base_hue = 0.0f;    // hue rotation (0..1) applied to the whole ramp — recenters it on green/blue/orange/etc.
     float randomness = 0.0f;  // 0 = deterministic ramp; >0 jitters each swatch in HSV
     int palette_seed = 0;     // PRNG seed; bump it (Randomize) for a new variation
 

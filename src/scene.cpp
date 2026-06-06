@@ -23,17 +23,21 @@ Vec3 vec3_from_json(const json& j) {
 json ramp_to_json(const std::vector<ColorStop>& stops) {
     json ramp = json::array();
     for (const auto& s : stops)
-        ramp.push_back({{"pos", s.pos}, {"color", to_json(s.color)}});
+        ramp.push_back({{"pos", s.pos}, {"color", to_json(s.color)}, {"alpha", s.alpha}});
     return ramp;
 }
 
 void ramp_from_json(const json& j, std::vector<ColorStop>& out) {
-    for (const auto& s : j)
-        out.push_back({s.at("pos").get<float>(), vec3_from_json(s.at("color"))});
+    for (const auto& s : j) {
+        ColorStop cs{s.at("pos").get<float>(), vec3_from_json(s.at("color"))};
+        cs.alpha = s.value("alpha", 1.0f);
+        out.push_back(cs);
+    }
 }
 
 json to_json(const Material& m) {
     json j{{"albedo", to_json(m.albedo)}, {"emissive", m.emissive},
+           {"two_sided", m.two_sided},
            {"pattern", m.pattern}, {"detail", to_json(m.detail)},
            {"noise_scale", m.noise_scale}, {"noise_octaves", m.noise_octaves},
            {"band_strength", m.band_strength}, {"band_freq", m.band_freq},
@@ -45,6 +49,11 @@ json to_json(const Material& m) {
         j["atmosphere"] = json{{"enabled", a.enabled}, {"color", to_json(a.color)},
                                {"sunset", to_json(a.sunset)}, {"thickness", a.thickness},
                                {"intensity", a.intensity}};
+    const Clouds& cl = m.clouds;
+    if (cl.enabled)
+        j["clouds"] = json{{"enabled", cl.enabled}, {"scale", cl.scale},
+                           {"octaves", cl.octaves}, {"coverage", cl.coverage},
+                           {"opacity", cl.opacity}, {"ramp", ramp_to_json(cl.ramp)}};
     return j;
 }
 
@@ -52,6 +61,7 @@ Material material_from_json(const json& j) {
     Material m;
     m.albedo = vec3_from_json(j.at("albedo"));
     m.emissive = j.value("emissive", false);
+    m.two_sided = j.value("two_sided", false);
     m.pattern = j.value("pattern", 0);
     if (j.contains("detail")) m.detail = vec3_from_json(j.at("detail"));
     m.noise_scale = j.value("noise_scale", m.noise_scale);
@@ -68,6 +78,15 @@ Material material_from_json(const json& j) {
         if (a.contains("sunset")) m.atmosphere.sunset = vec3_from_json(a.at("sunset"));
         m.atmosphere.thickness = a.value("thickness", m.atmosphere.thickness);
         m.atmosphere.intensity = a.value("intensity", m.atmosphere.intensity);
+    }
+    if (j.contains("clouds")) {
+        const json& c = j.at("clouds");
+        m.clouds.enabled = c.value("enabled", false);
+        m.clouds.scale = c.value("scale", m.clouds.scale);
+        m.clouds.octaves = c.value("octaves", m.clouds.octaves);
+        m.clouds.coverage = c.value("coverage", m.clouds.coverage);
+        m.clouds.opacity = c.value("opacity", m.clouds.opacity);
+        if (c.contains("ramp")) ramp_from_json(c.at("ramp"), m.clouds.ramp);
     }
     return m;
 }
@@ -137,8 +156,8 @@ json to_json(const PostProcess& p) {
                 {"base_a", to_json(p.base_a)}, {"base_b", to_json(p.base_b)},
                 {"palette_size", p.palette_size}, {"blur_radius", p.blur_radius},
                 {"dither", static_cast<int>(p.dither)}, {"iterations", p.iterations},
-                {"anchor_count", p.anchor_count}, {"randomness", p.randomness},
-                {"palette_seed", p.palette_seed}};
+                {"anchor_count", p.anchor_count}, {"base_hue", p.base_hue},
+                {"randomness", p.randomness}, {"palette_seed", p.palette_seed}};
 }
 
 PostProcess post_from_json(const json& j) {
@@ -155,6 +174,7 @@ PostProcess post_from_json(const json& j) {
     p.dither = static_cast<DitherMode>(j.value("dither", static_cast<int>(p.dither)));
     p.iterations = j.value("iterations", p.iterations);
     p.anchor_count = j.value("anchor_count", p.anchor_count);
+    p.base_hue = j.value("base_hue", p.base_hue);
     p.randomness = j.value("randomness", p.randomness);
     p.palette_seed = j.value("palette_seed", p.palette_seed);
     return p;
