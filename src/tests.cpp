@@ -397,9 +397,15 @@ static void starfield() {
     scene.background.density = 0.4f;
     scene.background.seed = 99;
     scene.background.tint = Vec3(0.9f, 0.8f, 1.0f);
+    scene.background.region_scale = 3.5f;
+    scene.background.region_strength = 0.7f;
+    scene.background.region_glow = 0.1f;
     Scene back = scene_from_json(scene_to_json(scene));
     assert(approx(back.background.density, 0.4f) && back.background.seed == 99 &&
            approx(back.background.tint.z, 1.0f));
+    assert(approx(back.background.region_scale, 3.5f) &&
+           approx(back.background.region_strength, 0.7f) &&
+           approx(back.background.region_glow, 0.1f));
 }
 
 static void surface_texture() {
@@ -548,6 +554,23 @@ static void postprocess() {
     assert(pp.palette.size() == 5);
     assert(approx(pp.palette.front().x, 0.0f) && approx(pp.palette.back().x, 1.0f));
 
+    // Seeded generation is reproducible; a different seed gives a different palette.
+    auto same_pal = [](const std::vector<Vec3>& A, const std::vector<Vec3>& B) {
+        if (A.size() != B.size()) return false;
+        for (size_t i = 0; i < A.size(); ++i)
+            if (!(approx(A[i].x, B[i].x) && approx(A[i].y, B[i].y) && approx(A[i].z, B[i].z)))
+                return false;
+        return true;
+    };
+    PostProcess g1; g1.anchor_count = 0; g1.randomness = 0.6f; g1.palette_size = 6;
+    g1.palette_seed = 42;
+    PostProcess g2 = g1;
+    generate_palette(g1);
+    generate_palette(g2);
+    assert(g1.palette.size() == 6 && same_pal(g1.palette, g2.palette));  // same seed -> identical
+    PostProcess g3 = g1; g3.palette_seed = 43; generate_palette(g3);
+    assert(!same_pal(g3.palette, g1.palette));  // different seed -> different
+
     // A 2x2 RGBA buffer of mixed grays. With a black/white palette, no dither,
     // no blur: every pixel snaps to the nearest of black or white, deterministically.
     auto pack = [](Vec3 c) {
@@ -592,9 +615,14 @@ static void postprocess() {
     Scene scene;
     scene.post = od;
     scene.post.iterations = 3;
+    scene.post.anchor_count = 1;
+    scene.post.randomness = 0.3f;
+    scene.post.palette_seed = 7;
     Scene back = scene_from_json(scene_to_json(scene));
     assert(back.post.iterations == 3 && back.post.dither == DitherMode::Ordered &&
            back.post.palette.size() == 2);
+    assert(back.post.anchor_count == 1 && approx(back.post.randomness, 0.3f) &&
+           back.post.palette_seed == 7);
 }
 
 int main() {

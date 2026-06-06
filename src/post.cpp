@@ -109,20 +109,62 @@ void box_blur(std::vector<Vec3>& img, int w, int h, int r) {
 
 }  // namespace
 
+namespace {
+// Tiny LCG so generation is reproducible from `palette_seed`.
+struct Rng {
+    uint32_t s;
+    float next() {  // [0,1)
+        s = s * 1664525u + 1013904223u;
+        return (s >> 8) * (1.0f / 16777216.0f);
+    }
+};
+// A harmonic hue offset (analogous / triadic / complementary) chosen by the rng.
+float harmonic_offset(Rng& rng) {
+    static const float offs[5] = {0.083f, -0.083f, 0.333f, -0.333f, 0.5f};
+    return offs[static_cast<int>(rng.next() * 5.0f) % 5];
+}
+}  // namespace
+
 void generate_palette(PostProcess& pp) {
     pp.palette.clear();
     int n = std::max(1, pp.palette_size);
-    Vec3 a = rgb_to_hsv(clamp01(pp.base_a));
-    Vec3 b = rgb_to_hsv(clamp01(pp.base_b));
+    Rng rng{static_cast<uint32_t>(pp.palette_seed) * 2654435761u + 1u};
+
+    // Pick the two HSV endpoints of the ramp from the anchor count.
+    Vec3 a, b;
+    if (pp.anchor_count <= 0) {  // fully seed-chosen harmonic pair
+        float h = rng.next();
+        float s = 0.5f + 0.4f * rng.next();
+        a = Vec3(h, s, 0.15f + 0.2f * rng.next());
+        b = Vec3(h + harmonic_offset(rng), s * (0.6f + 0.3f * rng.next()), 0.9f);
+    } else if (pp.anchor_count == 1) {  // ramp around base_a's hue
+        Vec3 base = rgb_to_hsv(clamp01(pp.base_a));
+        a = Vec3(base.x, base.y, std::max(0.15f, base.z * 0.4f));
+        b = Vec3(base.x + harmonic_offset(rng),
+                 std::clamp(base.y * 0.8f, 0.0f, 1.0f),
+                 std::min(1.0f, base.z * 1.2f + 0.3f));
+    } else {  // classic base_a -> base_b
+        a = rgb_to_hsv(clamp01(pp.base_a));
+        b = rgb_to_hsv(clamp01(pp.base_b));
+    }
+
     // Take the shorter way around the hue wheel so the ramp stays harmonic.
     float dh = b.x - a.x;
     if (dh > 0.5f) dh -= 1.0f;
     if (dh < -0.5f) dh += 1.0f;
+
+    const float r = std::max(0.0f, pp.randomness);
     for (int i = 0; i < n; ++i) {
         float t = (n == 1) ? 0.0f : static_cast<float>(i) / (n - 1);
-        float hue = a.x + dh * t;
-        hue -= std::floor(hue);
-        Vec3 hsv(hue, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t);
+        Vec3 hsv(a.x + dh * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t);
+        if (r > 0.0f) {  // perturb each swatch — jitter, not scatter (keeps it harmonic)
+            hsv.x += (rng.next() - 0.5f) * 0.05f * r;
+            hsv.y += (rng.next() - 0.5f) * 0.15f * r;
+            hsv.z += (rng.next() - 0.5f) * 0.15f * r;
+        }
+        hsv.x -= std::floor(hsv.x);
+        hsv.y = std::clamp(hsv.y, 0.0f, 1.0f);
+        hsv.z = std::clamp(hsv.z, 0.0f, 1.0f);
         pp.palette.push_back(clamp01(hsv_to_rgb(hsv)));
     }
 }

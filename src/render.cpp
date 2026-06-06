@@ -20,6 +20,24 @@ Vec3 hash33(Vec3 p) {
     p = p + Vec3(d, d, d);
     return vfract(Vec3((p.x + p.y) * p.z, (p.x + p.x) * p.y, (p.y + p.z) * p.x));
 }
+
+// Trilinear value noise + a small fbm over a direction, for large-scale star-
+// density regions (darker patches / a denser band, not true nebulae).
+float hash1(Vec3 p) { return hash33(p).x; }
+float vnoise(Vec3 p) {
+    Vec3 i = vfloor(p);
+    Vec3 f = p - i;
+    Vec3 u(f.x * f.x * (3 - 2 * f.x), f.y * f.y * (3 - 2 * f.y), f.z * f.z * (3 - 2 * f.z));
+    auto L = [](float a, float b, float t) { return a + (b - a) * t; };
+    float x00 = L(hash1(i + Vec3(0,0,0)), hash1(i + Vec3(1,0,0)), u.x);
+    float x10 = L(hash1(i + Vec3(0,1,0)), hash1(i + Vec3(1,1,0)), u.x);
+    float x01 = L(hash1(i + Vec3(0,0,1)), hash1(i + Vec3(1,0,1)), u.x);
+    float x11 = L(hash1(i + Vec3(0,1,1)), hash1(i + Vec3(1,1,1)), u.x);
+    return L(L(x00, x10, u.y), L(x01, x11, u.y), u.z);
+}
+float fbm2(Vec3 p) {
+    return 0.6667f * vnoise(p) + 0.3333f * vnoise(p * 2.03f + Vec3(11, 17, 23));
+}
 }  // namespace
 
 bool hit_world(const World& world, const Ray& r, float t_min, float t_max, HitRecord& rec) {
@@ -66,24 +84,44 @@ Vec3 background(const Ray& r, const Background& bg) {
     // Sampling by direction (not UV) avoids pole pinching.
     constexpr float FREQ = 60.0f;     // grid resolution; finer = smaller cells
     Vec3 dir = normalize(r.direction);
-    Vec3 p = dir * FREQ + Vec3(bg.seed * 0.137f, bg.seed * 0.071f, bg.seed * 0.219f);
-    Vec3 cell = vfloor(p);
+    Vec3 seed_off(bg.seed * 0.137f, bg.seed * 0.071f, bg.seed * 0.219f);
+    Vec3 p = dir * FREQ + seed_off;
+    Vec3 base = vfloor(p);
 
-    Vec3 r1 = hash33(cell);
-    if (r1.x >= bg.density) return bg.sky;  // no star in this cell
-
-    // Star centered within the cell so it isn't clipped at cell boundaries.
-    Vec3 r2 = hash33(cell + Vec3(13.1f, 47.3f, 7.7f));
-    Vec3 star = cell + Vec3(0.5f, 0.5f, 0.5f) + (r2 - Vec3(0.5f, 0.5f, 0.5f)) * 0.4f;
-    float dist = length(p - star);
+    // Large-scale regions modulate local star density (darker/denser areas).
+    float region = fbm2(dir * std::max(0.05f, bg.region_scale) + seed_off * 0.01f);
+    float dfactor = 1.0f + bg.region_strength * (region - 0.5f) * 2.0f;
+    float local_density = std::clamp(bg.density * dfactor, 0.0f, 1.0f);
     float radius = std::max(0.01f, bg.size);
-    float core = std::max(0.0f, 1.0f - dist / radius);
-    float intensity = core * core * bg.brightness * (0.4f + 0.6f * r1.y);
 
-    // Per-star warm/cool tint variation.
-    float cv = (r1.z - 0.5f) * 2.0f * bg.color_variation;
-    Vec3 col(bg.tint.x + cv, bg.tint.y, bg.tint.z - cv);
-    return bg.sky + col * intensity;
+    // Scan the 3x3x3 neighborhood so a fully-jittered star near a cell edge isn't
+    // clipped into an arc — the old single-cell sample produced visible grid rings.
+    // Keep the brightest contributor so stars stay round points, not blobs.
+    float best = 0.0f;
+    Vec3 best_tint(0, 0, 0);
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                Vec3 cell = base + Vec3(static_cast<float>(dx), static_cast<float>(dy),
+                                        static_cast<float>(dz));
+                Vec3 r1 = hash33(cell);
+                if (r1.x >= local_density) continue;  // no star in this cell
+                Vec3 r2 = hash33(cell + Vec3(13.1f, 47.3f, 7.7f));
+                Vec3 star = cell + r2;  // full-cell jitter -> no lattice rows
+                float dist = length(p - star);
+                float core = std::max(0.0f, 1.0f - dist / radius);
+                float intensity = core * core * bg.brightness * (0.4f + 0.6f * r1.y);
+                if (intensity > best) {
+                    best = intensity;
+                    float cv = (r1.z - 0.5f) * 2.0f * bg.color_variation;
+                    best_tint = Vec3(bg.tint.x + cv, bg.tint.y, bg.tint.z - cv);
+                }
+            }
+
+    Vec3 col = bg.sky;
+    if (bg.region_glow > 0.0f)  // faint additive haze in the densest regions
+        col = col + bg.tint * (bg.region_glow * smoothstep01(0.55f, 1.0f, region));
+    return col + best_tint * best;
 }
 
 Vec3 ray_color(const Ray& r, const World& world, const std::vector<Light>& lights,
@@ -216,4 +254,39 @@ void render_scene(const Scene& scene, float time, std::vector<uint32_t>& out) {
     // Final render always uses full lighting (Lit), matching the export.
     render_view(scene, scene_camera(scene, time, scene.aspect_ratio()), time,
                 scene.width, scene.height, out, ShadeMode::Lit);
+}
+
+void render_material_preview(const Material& m, int w, int h, std::vector<uint32_t>& out) {
+    out.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
+    World world{std::make_shared<Sphere>(Vec3(0, 0, 0), 1.0f, m)};
+    Camera cam(Vec3(0, 0, 3), Vec3(0, 0, 0), Vec3(0, 1, 0), 40.0f,
+               static_cast<float>(w) / static_cast<float>(h));
+    // One soft directional key from the upper-left gives form; a high ambient floor
+    // keeps it neutral so the texture (not the lighting) is what you read.
+    std::vector<Light> lights{{true, Vec3(-0.5f, -0.6f, -0.7f), Vec3(1, 1, 1), false}};
+    Background bg;
+    bg.density = 0.0f;
+    bg.sky = Vec3(0.12f, 0.12f, 0.14f);  // flat neutral backdrop
+    constexpr float AMBIENT = 0.3f;
+    for (int y = 0; y < h; ++y) {
+        float v = 1.0f - (static_cast<float>(y) + 0.5f) / static_cast<float>(h);
+        for (int x = 0; x < w; ++x) {
+            float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(w);
+            Vec3 c = ray_color(cam.get_ray(u, v), world, lights, AMBIENT, false, bg);
+            out[static_cast<size_t>(y) * w + x] = pack_rgba(c);
+        }
+    }
+}
+
+void render_background_preview(const Background& bg, int w, int h, std::vector<uint32_t>& out) {
+    out.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
+    Camera cam(Vec3(0, 0, 0), Vec3(0, 0, -1), Vec3(0, 1, 0), 70.0f,
+               static_cast<float>(w) / static_cast<float>(h));
+    for (int y = 0; y < h; ++y) {
+        float v = 1.0f - (static_cast<float>(y) + 0.5f) / static_cast<float>(h);
+        for (int x = 0; x < w; ++x) {
+            float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(w);
+            out[static_cast<size_t>(y) * w + x] = pack_rgba(background(cam.get_ray(u, v), bg));
+        }
+    }
 }

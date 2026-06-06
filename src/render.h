@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -17,10 +18,17 @@ struct Background {
     Vec3 sky{0.01f, 0.01f, 0.02f};  // base near-black space color
     float density = 0.08f;          // probability a grid cell holds a star [0,1]
     float brightness = 1.0f;        // star intensity scale
-    float size = 0.35f;             // star radius in grid-cell units (0..0.5)
+    float size = 0.2f;              // star radius in grid-cell units (0..0.5)
     Vec3 tint{1.0f, 1.0f, 1.0f};    // base star color
     float color_variation = 0.25f;  // warm/cool spread per star
     int seed = 1337;
+
+    // Large-scale density regions: a low-frequency field carves darker and denser
+    // areas across the sky (no true nebulae). region_glow adds a faint haze in the
+    // densest regions.
+    float region_scale = 2.0f;      // region feature size (lower = broader patches)
+    float region_strength = 0.5f;   // how strongly regions modulate local star density
+    float region_glow = 0.0f;       // additive haze in dense regions (0 = off)
 };
 
 // Stage 5: a single light. Directional lights model the old sun -> scene fill;
@@ -55,3 +63,9 @@ Vec3 background(const Ray& r, const Background& bg = Background{});
 // light optionally shadow-tested. Misses return the starfield described by `bg`.
 Vec3 ray_color(const Ray& r, const World& world, const std::vector<Light>& lights,
                float ambient, bool shadows, const Background& bg = Background{});
+
+// Small standalone previews for the editor panels — neutral lighting, no shadows,
+// no post-process, so the surface texture / sky read true. RGBA8, one uint32_t per
+// pixel (byte order R,G,B,A); row 0 = top. `out` is resized to w*h.
+void render_material_preview(const Material& m, int w, int h, std::vector<uint32_t>& out);
+void render_background_preview(const Background& bg, int w, int h, std::vector<uint32_t>& out);
