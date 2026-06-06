@@ -235,6 +235,8 @@ void render_view(const Scene& scene, const Camera& cam, float time,
     const std::vector<Light> lights = build_lights(scene, world, mode);
     const bool shadows = (mode != ShadeMode::InBetween);  // In-between skips shadows
     constexpr float AMBIENT = 0.15f;
+    // The per-pixel loop is read-only over `world`/`lights`, so rows parallelize.
+    #pragma omp parallel for schedule(dynamic, 8)
     for (int y = 0; y < h; ++y) {
         // Row 0 is the top; camera v runs bottom (0) -> top (1), so flip y.
         float v = 1.0f - (static_cast<float>(y) + 0.5f) / static_cast<float>(h);
