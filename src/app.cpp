@@ -88,6 +88,13 @@ struct Editor {
     GLuint tex = 0;
     std::vector<uint32_t> pixels;
 
+    // Viewport re-render gating: only raytrace when something can have changed,
+    // so an idle editor doesn't burn a core. `vp_hovered` is last frame's state;
+    // `redraw_frames` keeps rendering a few frames past activity so edits settle.
+    bool vp_hovered = false;
+    int redraw_frames = 2;
+    int last_rw = 0, last_rh = 0;
+
     // Neutral-light preview thumbnails (material in the Object tab, sky in World).
     GLuint mat_tex = 0, bg_tex = 0;
     std::vector<uint32_t> mat_px, bg_px;
@@ -803,13 +810,29 @@ void draw_viewport(Editor& ed) {
     int rw = std::clamp(region_w / 3, 80, 480);
     int rh = std::max(1, static_cast<int>(rw / aspect));
     Camera cam = active_camera(ed, aspect);
-    render_view(ed.scene, cam, ed.time, rw, rh, ed.pixels, ed.shade_mode);
-    upload_texture(ed, rw, rh);
+
+    // Re-raytrace only when something can have changed: animation playing, a widget
+    // or mouse drag in progress, the cursor over the viewport (where keys act), or a
+    // resize. Otherwise reuse the last texture so an idle editor stays at ~0% CPU.
+    bool resized = (rw != ed.last_rw || rh != ed.last_rh);
+    bool active = ed.playing || resized || ed.vp_hovered ||
+                  ImGui::IsAnyItemActive() ||
+                  ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
+                  ImGui::IsMouseDown(ImGuiMouseButton_Right);
+    if (active) ed.redraw_frames = 3;  // render now + trailing frames to settle edits
+    if (ed.redraw_frames > 0) {
+        render_view(ed.scene, cam, ed.time, rw, rh, ed.pixels, ed.shade_mode);
+        upload_texture(ed, rw, rh);
+        ed.last_rw = rw;
+        ed.last_rh = rh;
+        --ed.redraw_frames;
+    }
 
     ImVec2 img_pos = ImGui::GetCursorScreenPos();
     ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(ed.tex)),
                  ImVec2(static_cast<float>(region_w), static_cast<float>(region_h)));
     bool hovered = ImGui::IsItemHovered();
+    ed.vp_hovered = hovered;
 
     ScreenMap map{cam, img_pos, ImVec2(static_cast<float>(region_w),
                                        static_cast<float>(region_h))};
