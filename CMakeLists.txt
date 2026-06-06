@@ -11,6 +11,7 @@ add_library(core STATIC
     src/disk.cpp
     src/render.cpp
     src/scene.cpp
+    src/post.cpp
 )
 target_include_directories(core PUBLIC src third_party)
 

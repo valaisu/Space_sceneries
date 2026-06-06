@@ -6,35 +6,60 @@
 namespace {
 constexpr float PI = 3.14159265358979323846f;
 
-float hash21(float x, float y) {
-    float h = std::sin(x * 127.1f + y * 311.7f) * 43758.5453f;
+// Deterministic 3D hash -> [0,1] at integer lattice points.
+float hash31(float x, float y, float z) {
+    float h = std::sin(x * 127.1f + y * 311.7f + z * 74.7f) * 43758.5453f;
     return h - std::floor(h);
 }
 
-// Smooth value noise in [0,1], tiling in x with period `xp` so it wraps seamlessly
-// around the sphere's longitude (u = 0 and u = 1 are the same meridian).
-float value_noise(float x, float y, int xp) {
-    float xi = std::floor(x), yi = std::floor(y);
-    float xf = x - xi, yf = y - yi;
+// Smooth 3D value noise in [0,1] (trilinear interpolation of lattice hashes).
+// Sampled in object space, so it has no seam and no pole pinching on a sphere.
+float value_noise3(Vec3 p) {
+    float xi = std::floor(p.x), yi = std::floor(p.y), zi = std::floor(p.z);
+    float xf = p.x - xi, yf = p.y - yi, zf = p.z - zi;
     float sx = xf * xf * (3.0f - 2.0f * xf);
     float sy = yf * yf * (3.0f - 2.0f * yf);
-    auto wrap = [xp](float c) {
-        float m = std::fmod(c, static_cast<float>(xp));
-        return m < 0 ? m + xp : m;
+    float sz = zf * zf * (3.0f - 2.0f * zf);
+    auto corner = [&](float dx, float dy, float dz) {
+        return hash31(xi + dx, yi + dy, zi + dz);
     };
-    float x0 = wrap(xi), x1 = wrap(xi + 1);
-    float a = hash21(x0, yi), b = hash21(x1, yi);
-    float c = hash21(x0, yi + 1), d = hash21(x1, yi + 1);
-    float top = a + (b - a) * sx, bot = c + (d - c) * sx;
-    return top + (bot - top) * sy;
+    float x00 = corner(0, 0, 0) + (corner(1, 0, 0) - corner(0, 0, 0)) * sx;
+    float x10 = corner(0, 1, 0) + (corner(1, 1, 0) - corner(0, 1, 0)) * sx;
+    float x01 = corner(0, 0, 1) + (corner(1, 0, 1) - corner(0, 0, 1)) * sx;
+    float x11 = corner(0, 1, 1) + (corner(1, 1, 1) - corner(0, 1, 1)) * sx;
+    float y0 = x00 + (x10 - x00) * sy;
+    float y1 = x01 + (x11 - x01) * sy;
+    return y0 + (y1 - y0) * sz;
 }
 
-// Pattern mix factor in [0,1] for spherical coords (u = longitude, v = latitude).
-float pattern_factor(int pattern, float u, float v) {
-    if (pattern == 1) return 0.5f + 0.5f * std::sin(u * 2.0f * PI * 8.0f);  // stripes
-    return value_noise(u * 8.0f, v * 8.0f, 8);                             // mottled
+// Layered fbm in [0,1].
+float fbm3(Vec3 p, int octaves) {
+    float sum = 0.0f, amp = 0.5f, tot = 0.0f;
+    for (int i = 0; i < std::max(1, octaves); ++i) {
+        sum += amp * value_noise3(p);
+        tot += amp;
+        p = p * 2.0f;
+        amp *= 0.5f;
+    }
+    return (tot > 0.0f) ? sum / tot : 0.0f;
 }
 }  // namespace
+
+float surface_field(const Material& m, Vec3 p) {
+    float n = fbm3(p * m.noise_scale, m.noise_octaves);  // [0,1]
+    if (m.band_strength <= 0.0f) return n;
+    // Latitude bands (gas giants): sine of latitude, optionally warped by noise
+    // for swirly bands. p is a unit vector, so p.y is the sine of latitude.
+    float warped = p.y + (n - 0.5f) * m.warp;
+    float bands = 0.5f + 0.5f * std::sin(warped * m.band_freq * PI);
+    return n * (1.0f - m.band_strength) + bands * m.band_strength;
+}
+
+Vec3 surface_color(const Material& m, float field) {
+    field = std::clamp(field, 0.0f, 1.0f);
+    if (!m.tex_ramp.empty()) return sample_color_ramp(m.tex_ramp, field);
+    return m.albedo * (1.0f - field) + m.detail * field;
+}
 
 // Phase 2 / 4.2: ray-sphere intersection. Solve at^2 + bt + c = 0 and return the
 // nearest root in (t_min, t_max). Uses the half-b form to save a couple of mults.
@@ -60,14 +85,11 @@ bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
     rec.normal = normalize(rec.p - center);  // outward normal
     rec.material = material;
 
-    // Phase 9: procedural surface texture. Sample in body-local space (un-spun)
-    // so the pattern rotates with the body's spin over time.
+    // Phase 9 / Stage 4: procedural surface texture. Sample 3D object-space noise
+    // at the un-spun body-local point (no pole pinch), so it rotates with spin.
     if (material.pattern != 0) {
         Vec3 ln = rotate_about(rec.normal, spin_axis, -spin_angle);
-        float u = 0.5f + std::atan2(ln.z, ln.x) / (2.0f * PI);
-        float v = 0.5f - std::asin(std::clamp(ln.y, -1.0f, 1.0f)) / PI;
-        float f = pattern_factor(material.pattern, u, v);
-        rec.material.albedo = material.albedo * (1.0f - f) + material.detail * f;
+        rec.material.albedo = surface_color(material, surface_field(material, ln));
     }
     return true;
 }

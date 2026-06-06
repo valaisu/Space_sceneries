@@ -1,4 +1,5 @@
 // Headless sanity checks for the core (math, geometry, shading, scene, render).
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include "camera.h"
 #include "render.h"
 #include "scene.h"
+#include "post.h"
 
 static bool approx(float a, float b) { return std::fabs(a - b) < 1e-5f; }
 
@@ -63,25 +65,30 @@ static void phase2() {
                                              Material{Vec3(0.8f, 0.3f, 0.3f), false}));
     Vec3 light_dir(0, 0, -1);  // travels -z, so it lights the +z face (toward camera)
 
-    Vec3 bg = ray_color(cam.get_ray(0.0f, 0.0f), world, light_dir);  // corner -> miss
+    constexpr float AMBIENT = 0.15f;
+    auto dir_light = [](Vec3 d) { return std::vector<Light>{Light{true, d, Vec3(1, 1, 1), false}}; };
+
+    Background nostar;
+    nostar.density = 0.0f;  // disable stars so a miss is exactly the sky color
+    Vec3 bg = ray_color(cam.get_ray(0.0f, 0.0f), world, dir_light(light_dir), AMBIENT,
+                        true, nostar);  // corner -> miss
     assert(approx(bg.x, 0.01f) && approx(bg.z, 0.02f));
 
-    Vec3 lit = ray_color(center, world, light_dir);  // hits front face, fully lit
+    Vec3 lit = ray_color(center, world, dir_light(light_dir), AMBIENT, true);  // fully lit
     assert(approx(lit.x, 0.8f) && approx(lit.y, 0.3f) && approx(lit.z, 0.3f));
 
     // Dark side: front face lit from behind (light travels +z) gets ambient only.
-    constexpr float AMBIENT = 0.15f;
-    Vec3 dark = ray_color(center, world, Vec3(0, 0, 1));
+    Vec3 dark = ray_color(center, world, dir_light(Vec3(0, 0, 1)), AMBIENT, true);
     assert(approx(dark.x, 0.8f * AMBIENT) && approx(dark.y, 0.3f * AMBIENT));
 
     // Emissive ignores lighting.
     World emit;
     emit.push_back(std::make_shared<Sphere>(Vec3(0, 0, -5), 1.0f,
                                             Material{Vec3(1, 1, 0), true}));
-    Vec3 sun = ray_color(center, emit, Vec3(0, 0, 1));  // light pointing away
+    Vec3 sun = ray_color(center, emit, dir_light(Vec3(0, 0, 1)), AMBIENT, true);
     assert(approx(sun.x, 1.0f) && approx(sun.y, 1.0f) && approx(sun.z, 0.0f));
 
-    // Shadow: an occluder between the lit point and the light dims it to 0.1.
+    // Shadow: an occluder between the lit point and the light dims it to ambient.
     // Light is angled (travels down+into screen) so the shadow ray leaves the
     // camera axis; the occluder sits off-axis (y=1) and so misses the primary ray.
     World shadowed;
@@ -89,8 +96,17 @@ static void phase2() {
                                                 Material{Vec3(0.8f, 0.3f, 0.3f), false}));
     shadowed.push_back(std::make_shared<Sphere>(Vec3(0, 1, -3), 0.5f, white));
     Vec3 angled(0, -1, -1);  // to_light = (0,1,1)/sqrt(2)
-    Vec3 dim = ray_color(center, shadowed, angled);
+    Vec3 dim = ray_color(center, shadowed, dir_light(angled), AMBIENT, true);
     assert(approx(dim.x, 0.8f * AMBIENT));  // occluded -> ambient floor only
+
+    // Disabling shadows lets the same occluded point receive its diffuse again.
+    Vec3 nosh = ray_color(center, shadowed, dir_light(angled), AMBIENT, false);
+    assert(nosh.x > 0.8f * AMBIENT + 1e-3f);
+
+    // A positional light behaves like the directional one when far along -z.
+    std::vector<Light> pt{Light{false, Vec3(0, 0, 100), Vec3(1, 1, 1), false}};
+    Vec3 plit = ray_color(center, world, pt, AMBIENT, true);
+    assert(approx(plit.x, 0.8f) && approx(plit.y, 0.3f));
 }
 
 static void phase3() {
@@ -308,6 +324,279 @@ static void phase10() {
     assert(approx(fd.x, 0.0f) && approx(fd.z, -1.0f));
 }
 
+static void ring_ramp() {
+    // A ring spanning radius [1,3] with stops at 0 (red), 0.5 (green), 1 (blue).
+    // Sampling at known radii should reproduce the stop / midpoint colors.
+    Material m{Vec3(0, 0, 0), false};
+    m.ring_ramp = {{0.0f, Vec3(1, 0, 0)}, {0.5f, Vec3(0, 1, 0)}, {1.0f, Vec3(0, 0, 1)}};
+    Disk d(Vec3(0, 0, 0), Vec3(0, 0, 1), 1.0f, 3.0f, m);
+
+    HitRecord rec;
+    auto hit_at = [&](float radius) {
+        Ray r(Vec3(radius, 0, 5), Vec3(0, 0, -1));
+        bool ok = d.hit(r, 1e-3f, 1e30f, rec);
+        assert(ok);
+        return rec.material.albedo;
+    };
+    Vec3 inner = hit_at(1.0f);   // t = 0 -> red
+    assert(approx(inner.x, 1.0f) && approx(inner.y, 0.0f));
+    Vec3 mid = hit_at(2.0f);     // t = 0.5 -> green
+    assert(approx(mid.y, 1.0f) && approx(mid.x, 0.0f) && approx(mid.z, 0.0f));
+    Vec3 quarter = hit_at(1.5f); // t = 0.25 -> halfway red->green
+    assert(approx(quarter.x, 0.5f) && approx(quarter.y, 0.5f));
+
+    // Empty ramp leaves the solid albedo untouched.
+    Material solid{Vec3(0.3f, 0.4f, 0.5f), false};
+    Disk plain(Vec3(0, 0, 0), Vec3(0, 0, 1), 1.0f, 3.0f, solid);
+    Ray r(Vec3(2, 0, 5), Vec3(0, 0, -1));
+    assert(plain.hit(r, 1e-3f, 1e30f, rec));
+    assert(approx(rec.material.albedo.x, 0.3f) && approx(rec.material.albedo.z, 0.5f));
+
+    // JSON round-trips the stops.
+    Scene scene;
+    scene.bodies = {Body{std::make_shared<Disk>(d)}};
+    Scene back = scene_from_json(scene_to_json(scene));
+    auto bd = std::dynamic_pointer_cast<Disk>(back.bodies[0].shape);
+    assert(bd && bd->material.ring_ramp.size() == 3);
+    assert(approx(bd->material.ring_ramp[1].pos, 0.5f) &&
+           approx(bd->material.ring_ramp[1].color.y, 1.0f));
+}
+
+static void starfield() {
+    // density=0 -> always the sky color, regardless of direction.
+    Background off;
+    off.density = 0.0f;
+    off.sky = Vec3(0.02f, 0.03f, 0.05f);
+    for (Vec3 d : {Vec3(1, 0, 0), Vec3(0, 1, 0.3f), Vec3(-0.4f, 0.2f, -1)}) {
+        Vec3 c = background(Ray(Vec3(0, 0, 0), d), off);
+        assert(approx(c.x, 0.02f) && approx(c.y, 0.03f) && approx(c.z, 0.05f));
+    }
+
+    // density=1 -> every cell has a star; brightness adds light somewhere over the
+    // sky floor. Sweep directions and confirm at least one ray lands on a star core.
+    Background on;
+    on.density = 1.0f;
+    on.sky = Vec3(0, 0, 0);
+    on.brightness = 1.0f;
+    bool any_star = false;
+    for (int i = 0; i < 200; ++i) {
+        float a = i * 0.314159f;
+        Vec3 d(std::cos(a), 0.3f * std::sin(a * 2.0f), std::sin(a));
+        Vec3 c = background(Ray(Vec3(0, 0, 0), d), on);
+        if (c.x + c.y + c.z > 0.0f) any_star = true;
+    }
+    assert(any_star);
+
+    // Deterministic per seed: same ray + same params -> identical color.
+    Vec3 a = background(Ray(Vec3(0, 0, 0), Vec3(0.3f, 0.5f, -0.8f)), on);
+    Vec3 b = background(Ray(Vec3(0, 0, 0), Vec3(0.3f, 0.5f, -0.8f)), on);
+    assert(approx(a.x, b.x) && approx(a.y, b.y) && approx(a.z, b.z));
+
+    // JSON round-trips the background params.
+    Scene scene;
+    scene.background.density = 0.4f;
+    scene.background.seed = 99;
+    scene.background.tint = Vec3(0.9f, 0.8f, 1.0f);
+    Scene back = scene_from_json(scene_to_json(scene));
+    assert(approx(back.background.density, 0.4f) && back.background.seed == 99 &&
+           approx(back.background.tint.z, 1.0f));
+}
+
+static void surface_texture() {
+    Material m;
+    m.pattern = 1;
+    m.noise_scale = 3.0f;
+    m.noise_octaves = 4;
+    m.albedo = Vec3(0, 0, 0);
+    m.detail = Vec3(1, 1, 1);
+
+    // Deterministic and in range.
+    Vec3 a = normalize(Vec3(0.3f, 0.7f, 0.2f));
+    float fa = surface_field(m, a);
+    assert(fa >= 0.0f && fa <= 1.0f);
+    assert(approx(fa, surface_field(m, a)));
+
+    // Continuity: a tiny step on the surface changes the field only slightly.
+    Vec3 b = normalize(a + Vec3(0.002f, 0.0f, 0.0f));
+    assert(std::fabs(fa - surface_field(m, b)) < 0.05f);
+
+    // No pole pinch: two points near the north pole at different longitudes are
+    // genuinely different 3D samples, so the field differs (UV mapping would have
+    // crushed them together).
+    float n1 = surface_field(m, normalize(Vec3(0.05f, 1.0f, 0.0f)));
+    float n2 = surface_field(m, normalize(Vec3(0.0f, 1.0f, 0.05f)));
+    assert(std::fabs(n1 - n2) > 1e-4f);
+
+    // Latitude bands: with full band strength the field depends only on latitude
+    // (y), so sweeping latitude produces a clear spread of values, while moving
+    // along a parallel (same y) leaves it unchanged.
+    Material g = m;
+    g.band_strength = 1.0f;
+    g.band_freq = 4.0f;
+    g.warp = 0.0f;
+    float lo = 2.0f, hi = -1.0f;
+    for (int i = 0; i <= 8; ++i) {
+        float y = -0.9f + 0.225f * i;
+        float f = surface_field(g, normalize(Vec3(1, y, 0)));
+        lo = std::min(lo, f);
+        hi = std::max(hi, f);
+    }
+    assert(hi - lo > 0.5f);  // bands span a wide range across latitude
+    float p1 = surface_field(g, normalize(Vec3(1, 0.5f, 0.0f)));
+    float p2 = surface_field(g, normalize(Vec3(0.0f, 0.5f, 1.0f)));  // same y
+    assert(approx(p1, p2));
+
+    // surface_color: ramp wins when present, else albedo<->detail lerp.
+    assert(approx(surface_color(m, 0.0f).x, 0.0f) && approx(surface_color(m, 1.0f).x, 1.0f));
+    m.tex_ramp = {{0.0f, Vec3(0.2f, 0, 0)}, {1.0f, Vec3(0.8f, 0, 0)}};
+    assert(approx(surface_color(m, 0.5f).x, 0.5f));
+
+    // JSON round-trips the new texture fields.
+    Scene scene;
+    auto sp = std::make_shared<Sphere>(Vec3(0, 0, 0), 1.0f, g);
+    scene.bodies = {Body{sp}};
+    Scene back = scene_from_json(scene_to_json(scene));
+    auto bs = std::dynamic_pointer_cast<Sphere>(back.bodies[0].shape);
+    assert(bs && approx(bs->material.band_strength, 1.0f) &&
+           bs->material.noise_octaves == 4 && approx(bs->material.band_freq, 4.0f));
+}
+
+static void lighting() {
+    Material red{Vec3(0.8f, 0.3f, 0.3f), false};
+    World w;
+    w.push_back(std::make_shared<Sphere>(Vec3(0, 0, -5), 1.0f, red));  // front face z=-4
+    Ray center(Vec3(0, 0, 0), Vec3(0, 0, -1));
+    const float A = 0.15f;
+
+    // Lights add: two identical directional lights are brighter than one.
+    std::vector<Light> one{Light{true, Vec3(0, 0, -1), Vec3(1, 1, 1), false}};
+    std::vector<Light> two = one; two.push_back(one[0]);
+    Vec3 c1 = ray_color(center, w, one, A, true);
+    Vec3 c2 = ray_color(center, w, two, A, true);
+    assert(c2.x > c1.x + 1e-3f);
+
+    // Distance falloff dims a positional light but stays above the ambient floor.
+    std::vector<Light> nf{Light{false, Vec3(0, 0, 10), Vec3(1, 1, 1), false}};
+    std::vector<Light> wf{Light{false, Vec3(0, 0, 10), Vec3(1, 1, 1), true}};
+    Vec3 cnf = ray_color(center, w, nf, A, true);
+    Vec3 cwf = ray_color(center, w, wf, A, true);
+    assert(cwf.x < cnf.x - 1e-3f && cwf.x >= 0.8f * A - 1e-4f);
+
+    // Positional shadows only count occluders between the point and the light:
+    // an occluder beyond the light casts none.
+    World w2;
+    w2.push_back(std::make_shared<Sphere>(Vec3(0, 0, -5), 1.0f, red));
+    w2.push_back(std::make_shared<Sphere>(Vec3(0, 0, 2), 0.5f, Material{Vec3(1, 1, 1), false}));
+    std::vector<Light> lp{Light{false, Vec3(0, 0, -3), Vec3(1, 1, 1), false}};  // light at z=-3
+    Vec3 cbehind = ray_color(center, w2, lp, A, true);
+    assert(cbehind.x > 0.8f * A + 1e-3f);
+
+    // Scene lighting flags round-trip.
+    Scene sc; sc.fill_light = true; sc.light_falloff = true;
+    Scene bk = scene_from_json(scene_to_json(sc));
+    assert(bk.fill_light && bk.light_falloff);
+}
+
+static void atmosphere() {
+    Atmosphere a;
+    a.enabled = true;
+    a.color = Vec3(0.3f, 0.5f, 1.0f);
+    a.sunset = Vec3(1.0f, 0.4f, 0.1f);
+    a.thickness = 0.4f;
+    a.intensity = 1.0f;
+
+    Vec3 V(0, 0, 1);          // viewer looks down -z, view dir toward camera = +z
+    Vec3 sun(1, 0, 0);        // sun to the +x side
+
+    // Face-on, sun-lit point: little/no rim (normal ~ view dir).
+    Vec3 center = atmosphere_glow(a, Vec3(0, 0, 1), V, sun);
+    // Silhouette point on the sun side: strong rim glow.
+    Vec3 limb = atmosphere_glow(a, Vec3(0.98f, 0, 0.2f), V, sun);
+    float cmag = center.x + center.y + center.z;
+    float lmag = limb.x + limb.y + limb.z;
+    assert(lmag > cmag + 0.05f);     // rim brightens toward the silhouette
+
+    // Night-side silhouette (facing away from the sun): glow fades out.
+    Vec3 night = atmosphere_glow(a, Vec3(-0.98f, 0, 0.2f), V, sun);
+    assert(night.x + night.y + night.z < lmag * 0.5f);
+
+    // Terminator rim (normal perpendicular to sun) tints toward sunset: more red
+    // than blue, unlike the day limb which is blue-dominant.
+    Vec3 term = atmosphere_glow(a, normalize(Vec3(0.1f, 0, 1.0f)), V, sun);
+    assert(term.x > term.z);         // sunset (red) dominates at the terminator
+    assert(limb.z > limb.x);         // day limb is blue-dominant
+
+    // Disabled / off contributes nothing in the renderer: round-trips too.
+    Material m{Vec3(0.5f, 0.5f, 0.5f), false};
+    m.atmosphere = a;
+    Scene scene;
+    scene.bodies = {Body{std::make_shared<Sphere>(Vec3(0, 0, 0), 1.0f, m)}};
+    Scene back = scene_from_json(scene_to_json(scene));
+    auto bs = std::dynamic_pointer_cast<Sphere>(back.bodies[0].shape);
+    assert(bs && bs->material.atmosphere.enabled &&
+           approx(bs->material.atmosphere.sunset.x, 1.0f) &&
+           approx(bs->material.atmosphere.thickness, 0.4f));
+}
+
+static void postprocess() {
+    // generate_palette yields exactly palette_size colors, endpoints matching bases.
+    PostProcess pp;
+    pp.base_a = Vec3(0, 0, 0);
+    pp.base_b = Vec3(1, 1, 1);
+    pp.palette_size = 5;
+    generate_palette(pp);
+    assert(pp.palette.size() == 5);
+    assert(approx(pp.palette.front().x, 0.0f) && approx(pp.palette.back().x, 1.0f));
+
+    // A 2x2 RGBA buffer of mixed grays. With a black/white palette, no dither,
+    // no blur: every pixel snaps to the nearest of black or white, deterministically.
+    auto pack = [](Vec3 c) {
+        auto b = [](float v) { return static_cast<uint32_t>(v * 255.0f + 0.5f); };
+        return b(c.x) | (b(c.y) << 8) | (b(c.z) << 16) | (0xFFu << 24);
+    };
+    PostProcess bw;
+    bw.palette = {Vec3(0, 0, 0), Vec3(1, 1, 1)};
+    bw.blur_radius = 0.0f;
+    bw.dither = DitherMode::None;
+    std::vector<uint32_t> px = {pack(Vec3(0.1f, 0.1f, 0.1f)), pack(Vec3(0.9f, 0.9f, 0.9f)),
+                                pack(Vec3(0.4f, 0.4f, 0.4f)), pack(Vec3(0.6f, 0.6f, 0.6f))};
+    std::vector<uint32_t> a = px, b = px;
+    apply_post(bw, 2, 2, a);
+    apply_post(bw, 2, 2, b);
+    assert(a == b);  // deterministic
+    assert((a[0] & 0xFFFFFF) == 0x000000);   // 0.1 -> black
+    assert((a[1] & 0xFFFFFF) == 0xFFFFFF);   // 0.9 -> white
+    assert((a[2] & 0xFFFFFF) == 0x000000);   // 0.4 -> black (nearer)
+    assert((a[3] & 0xFFFFFF) == 0xFFFFFF);   // 0.6 -> white (nearer)
+
+    // Ordered dither is also deterministic and stays within the palette.
+    PostProcess od = bw;
+    od.dither = DitherMode::Ordered;
+    std::vector<uint32_t> d1 = px, d2 = px;
+    apply_post(od, 2, 2, d1);
+    apply_post(od, 2, 2, d2);
+    assert(d1 == d2);
+    for (uint32_t p : d1) {
+        uint32_t rgb = p & 0xFFFFFF;
+        assert(rgb == 0x000000 || rgb == 0xFFFFFF);
+    }
+
+    // Disabled or empty palette leaves the buffer untouched.
+    PostProcess off = bw;
+    off.enabled = false;
+    std::vector<uint32_t> untouched = px;
+    apply_post(off, 2, 2, untouched);
+    assert(untouched == px);
+
+    // JSON round-trips the post settings.
+    Scene scene;
+    scene.post = od;
+    scene.post.iterations = 3;
+    Scene back = scene_from_json(scene_to_json(scene));
+    assert(back.post.iterations == 3 && back.post.dither == DitherMode::Ordered &&
+           back.post.palette.size() == 2);
+}
+
 int main() {
     phase1();
     phase2();
@@ -317,6 +606,12 @@ int main() {
     phase7();
     phase9();
     phase10();
-    std::printf("Phase 1-3,5,6,7,9,10 sanity checks passed.\n");
+    ring_ramp();
+    starfield();
+    surface_texture();
+    lighting();
+    atmosphere();
+    postprocess();
+    std::printf("Phase 1-3,5,6,7,9,10 + ring ramp + starfield + texture + lighting + atmosphere + post checks passed.\n");
     return 0;
 }

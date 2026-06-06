@@ -7,7 +7,8 @@
 #include "vec3.h"
 #include "camera.h"
 #include "motion.h"
-#include "render.h"  // World
+#include "render.h"  // World, Background
+#include "post.h"    // PostProcess
 
 // Phase 3 / 5.1: holds everything the renderer and editor need. Camera is stored
 // as authoring params (not a built Camera) so it serializes cleanly; aspect is
@@ -39,7 +40,12 @@ struct Scene {
 
     SceneCamera cam;  // the render camera (4.1)
 
-    Vec3 light_dir{0, -1, -1};  // travel direction (4.3)
+    Vec3 light_dir{0, -1, -1};  // Stage 5: optional directional fill light (travel dir)
+    bool fill_light = false;    // include the directional fill in Lit mode
+    bool light_falloff = false; // suns use distance attenuation (off by default)
+
+    Background background;  // Stage 2: procedural starfield
+    PostProcess post;       // Stage 3: palette post-process
 
     // Output resolution (runtime value, exposed in the UI later — 7.1).
     int width = 400;
@@ -79,8 +85,11 @@ Vec3 orbit_ring_point(const Scene& scene, int i, float t, float angle);
 
 // Phase 7: render the scene from an explicit camera at an explicit resolution.
 // Used by the editor viewport (coarse, editor camera). Row 0 is the top.
+// `mode` selects the display lighting (Stage 5); the editor passes its current
+// mode, the final render uses Lit.
 void render_view(const Scene& scene, const Camera& cam, float t,
-                 int w, int h, std::vector<uint32_t>& out);
+                 int w, int h, std::vector<uint32_t>& out,
+                 ShadeMode mode = ShadeMode::Lit);
 
 // Phase 5 / 7.1: render the scene at time `t` into an RGBA8 buffer (one uint32_t
 // per pixel, byte order R,G,B,A). Row 0 is the top of the image — matches both the

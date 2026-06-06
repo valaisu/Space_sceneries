@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 
 #include "disk.h"
@@ -23,5 +24,13 @@ bool Disk::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
     // Orient the normal to face the incoming ray so both sides shade.
     rec.normal = (denom < 0.0f) ? normal : -normal;
     rec.material = material;
+
+    // Radial color ramp (Saturn-style bands), sampled inner->outer.
+    if (!material.ring_ramp.empty() && outer_radius > inner_radius) {
+        float radial = (std::sqrt(dist2) - inner_radius) /
+                       (outer_radius - inner_radius);
+        rec.material.albedo = sample_color_ramp(material.ring_ramp,
+                                                std::clamp(radial, 0.0f, 1.0f));
+    }
     return true;
 }

@@ -2,11 +2,14 @@
 
 A from-scratch C++ raytracer and **Blender-style scene editor** for composing
 simplified, pixel-art space scenes (planets, moons, rings, a sun) and exporting
-them as PNGs. Spheres and disks are intersected mathematically; lighting is a
-single directional light with hard shadows and an ambient fill.
+them as PNGs. Spheres and disks are intersected mathematically; **emissive bodies
+(suns) are the lights** (positional, ambient fill, optional directional fill) with
+hard shadows, and a **palette post-process** crushes the final image toward
+deliberate pixel-art color.
 
-`initial_ideas.md` is the original phased spec. This file is the coarse,
-up-to-date map; prefer it when the two disagree.
+`initial_ideas.md` is the original phased spec; `plan.md` is the artistic-upgrade
+plan (ring ramps, starfield, palette, 3D textures, sun lighting, atmosphere). This
+file is the coarse, up-to-date map; prefer it when they disagree.
 
 ## Build & run
 
@@ -34,12 +37,13 @@ gitignored). The editor needs a display; the tests do not.
 Core math / geometry (header-only unless noted):
 - `vec3.h` — `Vec3` + dot/cross/normalize/length + `rotate_about` (Rodrigues).
 - `ray.h` — `Ray`.
-- `material.h` — `Material` (albedo + emissive flag + procedural `pattern`/`detail`).
+- `material.h` — `Material` (albedo + emissive + 3D procedural texture fields + ring/tex `ColorStop` ramps + `Atmosphere`), `ColorStop` + `sample_color_ramp`, `Atmosphere`.
 - `hittable.h` — `Hittable` base (virtual `hit` + `clone`, plus `center` and `name`), `HitRecord`.
-- `sphere.h` / `sphere.cpp`, `disk.h` / `disk.cpp` — the two primitives + ray intersection.
+- `sphere.h` / `sphere.cpp`, `disk.h` / `disk.cpp` — the two primitives + ray intersection. `sphere.cpp` also has `surface_field`/`surface_color` (3D object-space texture); `disk.cpp` samples the radial ring ramp.
 - `camera.h` — LookAt `Camera`: `get_ray` (rays), `project` (world→screen, the exact inverse, used for overlays), and `right`/`up`/`forward` basis accessors (used by viewport transforms).
 - `motion.h` — `Orbit`, `Spin`, `Body` (a shape + its motion).
-- `render.h` / `render.cpp` — shading (`ray_color`: diffuse + hard shadow + ambient), `hit_world`, and `render_view` / `render_scene` (scene → RGBA8 pixel buffer).
+- `render.h` / `render.cpp` — `Light`, `ShadeMode`, `Background` (starfield); shading (`ray_color`: ambient + summed per-light diffuse + hard shadows; `atmosphere_glow`; `background`); `hit_world`; `render_view` / `render_scene` (scene → RGBA8, then `apply_post`).
+- `post.h` / `post.cpp` — `PostProcess`, `DitherMode`; `generate_palette` (HSV harmonic ramp) + `apply_post` (blur → quantize/dither over the RGBA8 buffer). In `core`, no UI deps.
 - `scene.h` / `scene.cpp` — `Scene`, `SceneCamera` (+ `CamLook`), JSON save/load, and posing (`body_world_pos`, `world_at_time`, `orbit_ring_point`, `camera_eye`, `scene_camera`).
 
 Executables:
@@ -56,11 +60,12 @@ Executables:
 ## Architecture
 
 **Scene model.** A `Scene` holds `std::vector<Body>`, a `SceneCamera`, the
-directional `light_dir`, and the output `width`/`height`. A `Body` is a `shape`
-(`Sphere`/`Disk`) plus an `Orbit` and a `Spin`. There are **no separate Planet/Moon
-types** — those are just spheres with a name and material. The `Disk` primitive
-doubles as a **ring** (annulus via `inner_radius`); the editor's Add menu exposes it
-as "Ring".
+directional fill `light_dir` (+ `fill_light`/`light_falloff` flags), a `Background`
+(starfield), a `PostProcess` (palette), and the output `width`/`height`. A `Body` is
+a `shape` (`Sphere`/`Disk`) plus an `Orbit` and a `Spin`. There are **no separate
+Planet/Moon types** — those are just spheres with a name and material. The `Disk`
+primitive doubles as a **ring** (annulus via `inner_radius`); the editor's Add menu
+exposes it as "Ring".
 
 **Camera as an object.** The render camera is a `SceneCamera`: a movable, orbitable
 scene object (not just authoring params). It has a `position` *or* an `Orbit`
@@ -79,17 +84,41 @@ parent chain at time `t`; `world_at_time(scene, t)` returns a posed snapshot
 `world_at_time` also bakes each sphere's spin orientation (`spin_axis`/`spin_angle`,
 from `Spin` + `t`) into the posed clone.
 
-**Textures (Phase 9).** A sphere `Material` can carry a procedural `pattern`
-(0 solid / 1 stripes / 2 mottled) mixing `albedo` toward `detail`. `Sphere::hit`
-samples it in body-local space (un-spun via `spin_angle`) using spherical UVs, so a
-spinning textured sphere visibly rotates. The mottled noise tiles in longitude
-(seamless wrap). Emissive bodies keep using their (textured) albedo directly.
+**Textures (Phase 9 → Stage 4).** A sphere `Material` with `pattern != 0` carries a
+**3D object-space** procedural texture: layered fbm noise (`noise_scale`,
+`noise_octaves`) optionally blended toward warped latitude bands (`band_strength`,
+`band_freq`, `warp`) for gas giants, mapped through `tex_ramp` (or `albedo`↔`detail`
+when empty). `Sphere::hit` samples it at the **un-spun body-local point** (no pole
+pinch, no seam), so a spinning textured sphere visibly rotates. `surface_field`
+(scalar) / `surface_color` (albedo) are split out and unit-tested.
 
-**Rendering.** `render_view` shoots one primary ray per pixel from a given camera,
-finds the nearest hit, and shades: emissive surfaces return their albedo;
-others use `ambient + (1-ambient)*diffuse`, with `diffuse = max(0, dot(N, -light_dir))`
-zeroed when a shadow ray toward the light is blocked. Misses return a near-black
-background. Output is RGBA8, one `uint32_t` per pixel, **row 0 = top**.
+**Lighting (Stage 5).** Lights are gathered at pose time. In the final/`Lit` render,
+each **emissive sphere is a positional light** (color = its albedo, optional
+inverse-square `light_falloff`), plus an optional directional fill (`light_dir`,
+gated by `fill_light`; also the fallback when there are no suns). `ray_color` sums an
+ambient floor + per-light diffuse, shadow-testing each (emissive bodies are
+**transparent to shadow rays**, so suns don't shadow themselves). Editor-only
+`ShadeMode` previews: `Direction` (fixed directional + shadows = the old look),
+`InBetween` (one directional auto-aimed from the main sun, no shadows), `Lit`
+(matches export). `render_scene` always uses `Lit`.
+
+**Background (Stage 2).** Misses return a seeded **starfield**: `background()` hashes
+a 3D grid sampled by ray direction (no pole pinch), one star per cell with size /
+brightness / tint-variation / density / seed from `Scene::background`.
+
+**Atmosphere (Stage 6).** A sphere `Material` may carry an `Atmosphere` (day `color`,
+`sunset` tint, `thickness`, `intensity`). `atmosphere_glow` adds a Fresnel-like limb
+term (bright at the silhouette), gated to the sun-lit side and tinted toward `sunset`
+near the terminator. Purely additive — **no transparency, no second ray.**
+
+**Rendering & post (Stage 3).** `render_view` shoots one primary ray per pixel, shades
+the nearest hit, composites stars on misses, then runs `apply_post`: blur →
+quantize each pixel to the nearest `PostProcess::palette` color with dithering
+(`None` / ordered Bayer / random), optionally repeated. Used by **both** viewport and
+export so they match; gated by `PostProcess::enabled`. Palettes are generated from two
+base colors (`generate_palette`, HSV ramp) and hand-editable. Output is RGBA8, one
+`uint32_t` per pixel, **row 0 = top**. (Open issue, per `plan.md`: dithering shimmers
+under camera/body motion — deliberately not solved yet.)
 
 **Editor (`app.cpp`).** Blender-style single-viewport layout: top menu bar +
 central viewport + contextual Properties panel (right) + Timeline strip (bottom).
@@ -108,13 +137,24 @@ view-pivot crosshair, and a corner **X/Y/Z axis gizmo**. **R/S** are still modal
 Blender transforms (rotate/scale) — move the mouse, left-click/Enter to confirm,
 right-click/Esc to cancel. The Timeline has Play/Pause (also **Space**), speed, and
 a time scrubber; while playing, `time` advances by frame delta so orbits and spin
-animate. View ▸ "Look through camera" renders from the scene's render camera; Export
-PNG renders that camera at full resolution.
+animate. View ▸ "Look through camera" renders from the scene's render camera; View ▸
+"Display mode" picks the viewport `ShadeMode` (Direction / In-between / Lit); Export
+PNG renders the render camera at full resolution (always Lit). With **nothing
+selected**, the Properties panel shows the scene-global panels (Lighting, Background
+starfield, Stylize palette post-process); selecting a sphere exposes its texture and
+atmosphere panels, a ring its color ramp.
 
 ## Conventions & gotchas
 
 - **Light direction:** `light_dir` is the direction light *travels* (sun → scene);
-  the to-light direction is `-light_dir`. Diffuse and shadow rays both use `-light_dir`.
+  the to-light direction is `-light_dir`. It is now the **optional directional fill**
+  (off in `Lit` unless `fill_light`); the primary lights are the emissive suns.
+- **Suns don't shadow themselves:** shadow rays ignore emissive hits (a sun sphere
+  sits at its own light position, so it would otherwise occlude every shadow ray).
+- **Post-process runs inside `render_view`**, so the editor viewport and the PNG
+  export are identically stylized; overlays are drawn on top via ImGui and stay crisp.
+- **Color ramps are shared:** `sample_color_ramp` (in `material.h`) serves both the
+  radial ring ramp and the sphere texture ramp; the editor's `ramp_editor` edits both.
 - **Image orientation:** pixel row 0 is the top, matching both the GL texture upload
   and stb's PNG layout — no vertical flips.
 - **`Vec3` is `{float x,y,z;}` with no vtable**, so `&v.x` is a valid `float[3]`

@@ -20,9 +20,32 @@ Vec3 vec3_from_json(const json& j) {
     return Vec3(j.at(0).get<float>(), j.at(1).get<float>(), j.at(2).get<float>());
 }
 
+json ramp_to_json(const std::vector<ColorStop>& stops) {
+    json ramp = json::array();
+    for (const auto& s : stops)
+        ramp.push_back({{"pos", s.pos}, {"color", to_json(s.color)}});
+    return ramp;
+}
+
+void ramp_from_json(const json& j, std::vector<ColorStop>& out) {
+    for (const auto& s : j)
+        out.push_back({s.at("pos").get<float>(), vec3_from_json(s.at("color"))});
+}
+
 json to_json(const Material& m) {
-    return json{{"albedo", to_json(m.albedo)}, {"emissive", m.emissive},
-                {"pattern", m.pattern}, {"detail", to_json(m.detail)}};
+    json j{{"albedo", to_json(m.albedo)}, {"emissive", m.emissive},
+           {"pattern", m.pattern}, {"detail", to_json(m.detail)},
+           {"noise_scale", m.noise_scale}, {"noise_octaves", m.noise_octaves},
+           {"band_strength", m.band_strength}, {"band_freq", m.band_freq},
+           {"warp", m.warp}};
+    if (!m.ring_ramp.empty()) j["ring_ramp"] = ramp_to_json(m.ring_ramp);
+    if (!m.tex_ramp.empty()) j["tex_ramp"] = ramp_to_json(m.tex_ramp);
+    const Atmosphere& a = m.atmosphere;
+    if (a.enabled)
+        j["atmosphere"] = json{{"enabled", a.enabled}, {"color", to_json(a.color)},
+                               {"sunset", to_json(a.sunset)}, {"thickness", a.thickness},
+                               {"intensity", a.intensity}};
+    return j;
 }
 
 Material material_from_json(const json& j) {
@@ -31,6 +54,21 @@ Material material_from_json(const json& j) {
     m.emissive = j.value("emissive", false);
     m.pattern = j.value("pattern", 0);
     if (j.contains("detail")) m.detail = vec3_from_json(j.at("detail"));
+    m.noise_scale = j.value("noise_scale", m.noise_scale);
+    m.noise_octaves = j.value("noise_octaves", m.noise_octaves);
+    m.band_strength = j.value("band_strength", m.band_strength);
+    m.band_freq = j.value("band_freq", m.band_freq);
+    m.warp = j.value("warp", m.warp);
+    if (j.contains("ring_ramp")) ramp_from_json(j.at("ring_ramp"), m.ring_ramp);
+    if (j.contains("tex_ramp")) ramp_from_json(j.at("tex_ramp"), m.tex_ramp);
+    if (j.contains("atmosphere")) {
+        const json& a = j.at("atmosphere");
+        m.atmosphere.enabled = a.value("enabled", false);
+        if (a.contains("color")) m.atmosphere.color = vec3_from_json(a.at("color"));
+        if (a.contains("sunset")) m.atmosphere.sunset = vec3_from_json(a.at("sunset"));
+        m.atmosphere.thickness = a.value("thickness", m.atmosphere.thickness);
+        m.atmosphere.intensity = a.value("intensity", m.atmosphere.intensity);
+    }
     return m;
 }
 
@@ -67,6 +105,50 @@ std::shared_ptr<Hittable> object_from_json(const json& j) {
     }
     obj->name = j.value("name", std::string{});
     return obj;
+}
+
+json to_json(const Background& b) {
+    return json{{"sky", to_json(b.sky)}, {"density", b.density},
+                {"brightness", b.brightness}, {"size", b.size},
+                {"tint", to_json(b.tint)}, {"color_variation", b.color_variation},
+                {"seed", b.seed}};
+}
+
+Background background_from_json(const json& j) {
+    Background b;
+    if (j.contains("sky")) b.sky = vec3_from_json(j.at("sky"));
+    b.density = j.value("density", b.density);
+    b.brightness = j.value("brightness", b.brightness);
+    b.size = j.value("size", b.size);
+    if (j.contains("tint")) b.tint = vec3_from_json(j.at("tint"));
+    b.color_variation = j.value("color_variation", b.color_variation);
+    b.seed = j.value("seed", b.seed);
+    return b;
+}
+
+json to_json(const PostProcess& p) {
+    json pal = json::array();
+    for (const auto& c : p.palette) pal.push_back(to_json(c));
+    return json{{"enabled", p.enabled}, {"palette", pal},
+                {"base_a", to_json(p.base_a)}, {"base_b", to_json(p.base_b)},
+                {"palette_size", p.palette_size}, {"blur_radius", p.blur_radius},
+                {"dither", static_cast<int>(p.dither)}, {"iterations", p.iterations}};
+}
+
+PostProcess post_from_json(const json& j) {
+    PostProcess p;
+    p.enabled = j.value("enabled", p.enabled);
+    if (j.contains("palette")) {
+        p.palette.clear();
+        for (const auto& c : j.at("palette")) p.palette.push_back(vec3_from_json(c));
+    }
+    if (j.contains("base_a")) p.base_a = vec3_from_json(j.at("base_a"));
+    if (j.contains("base_b")) p.base_b = vec3_from_json(j.at("base_b"));
+    p.palette_size = j.value("palette_size", p.palette_size);
+    p.blur_radius = j.value("blur_radius", p.blur_radius);
+    p.dither = static_cast<DitherMode>(j.value("dither", static_cast<int>(p.dither)));
+    p.iterations = j.value("iterations", p.iterations);
+    return p;
 }
 
 json to_json(const Orbit& o) {
@@ -159,6 +241,10 @@ std::string scene_to_json(const Scene& scene) {
     json j{
         {"camera", to_json(scene.cam)},
         {"light_dir", to_json(scene.light_dir)},
+        {"fill_light", scene.fill_light},
+        {"light_falloff", scene.light_falloff},
+        {"background", to_json(scene.background)},
+        {"post", to_json(scene.post)},
         {"resolution", {{"width", scene.width}, {"height", scene.height}}},
         {"bodies", bodies},
     };
@@ -172,6 +258,14 @@ Scene scene_from_json(const std::string& text) {
     scene.cam = camera_from_json(j.at("camera"));
 
     scene.light_dir = vec3_from_json(j.at("light_dir"));
+    scene.fill_light = j.value("fill_light", false);
+    scene.light_falloff = j.value("light_falloff", false);
+
+    if (j.contains("background"))
+        scene.background = background_from_json(j.at("background"));
+
+    if (j.contains("post"))
+        scene.post = post_from_json(j.at("post"));
 
     const json& res = j.at("resolution");
     scene.width = res.at("width").get<int>();
