@@ -79,5 +79,6 @@ void render_view(const Scene& scene, const Camera& cam, float time,
 }
 
 void render_scene(const Scene& scene, float time, std::vector<uint32_t>& out) {
-    render_view(scene, scene.camera(), time, scene.width, scene.height, out);
+    render_view(scene, scene_camera(scene, time, scene.aspect_ratio()), time,
+                scene.width, scene.height, out);
 }

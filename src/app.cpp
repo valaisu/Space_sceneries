@@ -25,6 +25,10 @@ namespace {
 
 constexpr float PI = 3.14159265358979323846f;
 
+// Selection sentinels: -1 nothing, -2 the camera object; >= 0 indexes a body.
+constexpr int SEL_NONE = -1;
+constexpr int SEL_CAMERA = -2;
+
 // ---- Editor (orbit) camera -------------------------------------------------
 // Orbits a target point. Default looks straight down (top view).
 struct OrbitCam {
@@ -45,9 +49,16 @@ Vec3 cam_right(float yaw) { return Vec3(std::cos(yaw), 0.0f, -std::sin(yaw)); }
 
 Camera build_editor_camera(const OrbitCam& c, float aspect) {
     Vec3 fwd = cam_forward(c.yaw, c.pitch);
-    Vec3 up = cross(cam_right(c.yaw), fwd);
+    Vec3 up = cross(fwd, cam_right(c.yaw));  // world-up-aligned (+Y for level views)
     Vec3 eye = c.target - fwd * c.distance;
     return Camera(eye, c.target, up, c.fov, aspect);
+}
+
+// Aim the edit camera down a world axis (X/Y/Z keys: align the view with an axis).
+void align_view(OrbitCam& c, Vec3 forward_dir) {
+    Vec3 f = normalize(forward_dir);
+    c.pitch = std::asin(std::clamp(f.y, -1.0f, 1.0f));
+    c.yaw = std::atan2(f.x, f.z);
 }
 
 // Orthonormal basis (u, v) spanning the plane perpendicular to `n`.
@@ -103,21 +114,21 @@ Scene make_default_scene() {
 
     s.bodies = {sun, planet};
     s.light_dir = Vec3(-1, -1, -0.5f);
-    s.cam_lookfrom = Vec3(0, 6, 14);
-    s.cam_lookat = Vec3(0, 0, 0);
-    s.cam_fov = 50.0f;
+    s.cam.position = Vec3(0, 6, 14);
+    s.cam.fov = 50.0f;
+    s.cam.look = CamLook::Target;
+    s.cam.target = 0;  // track the Sun
     return s;
 }
 
 Camera active_camera(const Editor& ed, float aspect) {
     if (ed.look_through_camera)
-        return Camera(ed.scene.cam_lookfrom, ed.scene.cam_lookat, ed.scene.cam_vup,
-                      ed.scene.cam_fov, aspect);
+        return scene_camera(ed.scene, ed.time, aspect);
     return build_editor_camera(ed.cam, aspect);
 }
 
 float active_fov(const Editor& ed) {
-    return ed.look_through_camera ? ed.scene.cam_fov : ed.cam.fov;
+    return ed.look_through_camera ? ed.scene.cam.fov : ed.cam.fov;
 }
 
 // Pick the nearest body hit by a ray; returns body index or -1.
@@ -218,9 +229,149 @@ void draw_selection_outline(ImDrawList* dl, const ScreenMap& map,
     }
 }
 
+const ImU32 COL_CAMERA = IM_COL32(220, 220, 220, 200);
+
+// Screen position of the camera's eye at the current time. False if behind us.
+bool camera_screen_pos(const ScreenMap& map, const Scene& scene, float t, ImVec2& out) {
+    return map.to_screen(camera_eye(scene, t), out);
+}
+
+// A little frustum gizmo at the camera's posed position/orientation.
+void draw_camera_gizmo(ImDrawList* dl, const ScreenMap& map, const Scene& scene,
+                       float t, ImU32 col) {
+    Camera c = scene_camera(scene, t, 1.0f);  // aspect-independent for eye/basis
+    Vec3 eye = c.eye(), f = c.forward(), r = c.right(), u = c.up();
+    const float depth = 0.9f, hw = 0.6f, hh = 0.45f;
+    Vec3 ctr = eye + f * depth;
+    Vec3 corners[4] = {ctr + r * hw + u * hh, ctr - r * hw + u * hh,
+                       ctr - r * hw - u * hh, ctr + r * hw - u * hh};
+    ImVec2 a, p[4];
+    if (!map.to_screen(eye, a)) return;
+    for (int i = 0; i < 4; ++i)
+        if (!map.to_screen(corners[i], p[i])) return;
+    for (int i = 0; i < 4; ++i) {
+        dl->AddLine(a, p[i], col, 1.5f);
+        dl->AddLine(p[i], p[(i + 1) % 4], col, 1.5f);
+    }
+    dl->AddCircleFilled(a, 3.0f, col);
+}
+
+// The camera's own orbit path (mirrors draw_orbit, which is body-indexed).
+void draw_camera_orbit(ImDrawList* dl, const ScreenMap& map, const Scene& scene,
+                       float t, ImU32 col) {
+    const Orbit& o = scene.cam.orbit;
+    Vec3 base(0, 0, 0);
+    if (o.parent >= 0 && o.parent < static_cast<int>(scene.bodies.size()))
+        base = body_world_pos(scene, o.parent, t);
+    Vec3 bu, bv;
+    basis_from_normal(o.normal, bu, bv);
+    constexpr int N = 64;
+    ImVec2 pts[N];
+    int n = 0;
+    bool any_behind = false;
+    for (int k = 0; k < N; ++k) {
+        float ang = (2.0f * PI * k) / N;
+        Vec3 wp = base + (bu * std::cos(ang) + bv * std::sin(ang)) * o.radius;
+        if (map.to_screen(wp, pts[n])) ++n; else any_behind = true;
+    }
+    if (n >= 2)
+        dl->AddPolyline(pts, n, col, any_behind ? 0 : ImDrawFlags_Closed, 1.5f);
+}
+
+// A small crosshair-in-a-ring marker at a world point (scene origin / view pivot).
+void draw_marker(ImDrawList* dl, const ScreenMap& map, Vec3 p, ImU32 col,
+                 const char* label) {
+    ImVec2 s;
+    if (!map.to_screen(p, s)) return;
+    const float r = 6.0f;
+    dl->AddLine(ImVec2(s.x - r, s.y), ImVec2(s.x + r, s.y), col, 1.5f);
+    dl->AddLine(ImVec2(s.x, s.y - r), ImVec2(s.x, s.y + r), col, 1.5f);
+    dl->AddCircle(s, r, col, 16, 1.5f);
+    if (label) dl->AddText(ImVec2(s.x + r + 2, s.y - 6), col, label);
+}
+
+// Corner axis indicator: short lines along the projected world X/Y/Z directions.
+void draw_axis_gizmo(ImDrawList* dl, const Camera& cam, ImVec2 corner) {
+    Vec3 r = cam.right(), u = cam.up();
+    const float len = 24.0f;
+    struct Axis { Vec3 dir; ImU32 col; const char* name; };
+    const Axis axes[3] = {
+        {Vec3(1, 0, 0), IM_COL32(232, 86, 86, 255), "X"},
+        {Vec3(0, 1, 0), IM_COL32(124, 200, 96, 255), "Y"},
+        {Vec3(0, 0, 1), IM_COL32(92, 142, 236, 255), "Z"},
+    };
+    for (const Axis& ax : axes) {
+        ImVec2 tip(corner.x + dot(ax.dir, r) * len, corner.y - dot(ax.dir, u) * len);
+        dl->AddLine(corner, tip, ax.col, 2.0f);
+        dl->AddText(ImVec2(tip.x - 3, tip.y - 7), ax.col, ax.name);
+    }
+}
+
 // ---- Properties panel (contextual) ----------------------------------------
+
+// Shared Orbit editor used by both bodies and the camera. `exclude` is a body
+// index to omit from the parent picker (a body can't orbit itself); -1 excludes none.
+void orbit_controls(Orbit& orbit, const std::vector<Body>& bodies, int exclude) {
+    ImGui::SeparatorText("Orbit");
+    ImGui::Checkbox("Orbiting", &orbit.active);
+    if (!orbit.active) return;
+    const char* cur = (orbit.parent < 0 || orbit.parent >= static_cast<int>(bodies.size()))
+                          ? "(origin)"
+                          : bodies[orbit.parent].shape->name.c_str();
+    if (ImGui::BeginCombo("Parent", cur)) {
+        if (ImGui::Selectable("(origin)", orbit.parent < 0)) orbit.parent = -1;
+        for (int i = 0; i < static_cast<int>(bodies.size()); ++i) {
+            if (i == exclude) continue;
+            if (ImGui::Selectable(bodies[i].shape->name.c_str(), orbit.parent == i))
+                orbit.parent = i;
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::DragFloat("Orbit Radius", &orbit.radius, 0.1f, 0.0f, 1000.0f);
+    ImGui::DragFloat("Period (s)", &orbit.period, 0.1f, 0.01f, 100000.0f);
+    ImGui::SliderAngle("Phase", &orbit.phase);
+    ImGui::DragFloat3("Plane Normal", &orbit.normal.x, 0.05f);
+}
+
+void draw_camera_properties(Editor& ed) {
+    SceneCamera& c = ed.scene.cam;
+    ImGui::TextUnformatted("Camera");
+    ImGui::SeparatorText("Transform");
+    if (!c.orbit.active) ImGui::DragFloat3("Position", &c.position.x, 0.1f);
+    ImGui::SliderFloat("FOV", &c.fov, 10.0f, 120.0f);
+    ImGui::DragFloat3("Up", &c.vup.x, 0.05f);
+
+    ImGui::SeparatorText("Look");
+    const char* modes[] = {"Direction", "Target", "Spin"};
+    int li = static_cast<int>(c.look);
+    if (ImGui::Combo("Mode", &li, modes, 3)) c.look = static_cast<CamLook>(li);
+    if (c.look == CamLook::Direction) {
+        ImGui::DragFloat3("Direction", &c.direction.x, 0.05f);
+    } else if (c.look == CamLook::Target) {
+        const char* cur = (c.target < 0 || c.target >= static_cast<int>(ed.scene.bodies.size()))
+                              ? "(origin)"
+                              : ed.scene.bodies[c.target].shape->name.c_str();
+        if (ImGui::BeginCombo("Target", cur)) {
+            if (ImGui::Selectable("(origin)", c.target < 0)) c.target = -1;
+            for (int i = 0; i < static_cast<int>(ed.scene.bodies.size()); ++i)
+                if (ImGui::Selectable(ed.scene.bodies[i].shape->name.c_str(), c.target == i))
+                    c.target = i;
+            ImGui::EndCombo();
+        }
+    } else {  // Spin
+        ImGui::DragFloat("Spin Period (s)", &c.spin_period, 0.1f);
+        ImGui::SliderAngle("Spin Phase", &c.spin_phase);
+    }
+
+    orbit_controls(c.orbit, ed.scene.bodies, -1);
+}
 void draw_properties(Editor& ed) {
     ImGui::Begin("Properties", nullptr, PANEL_FLAGS);
+    if (ed.selected == SEL_CAMERA) {
+        draw_camera_properties(ed);
+        ImGui::End();
+        return;
+    }
     if (ed.selected < 0 || ed.selected >= static_cast<int>(ed.scene.bodies.size())) {
         ImGui::TextWrapped("Nothing selected. Click an object in the viewport, "
                            "or use the Add menu to create one.");
@@ -250,7 +401,7 @@ void draw_properties(Editor& ed) {
         if (s->material.pattern != 0)
             ImGui::ColorEdit3("Detail", &s->material.detail.x);
     } else if (auto d = std::dynamic_pointer_cast<Disk>(obj)) {
-        ImGui::TextUnformatted("Disk");
+        ImGui::TextUnformatted("Ring");
         if (!orbiting) ImGui::DragFloat3("Position", &d->center.x, 0.1f);
         ImGui::DragFloat3("Normal", &d->normal.x, 0.05f);
         ImGui::SliderFloat("Inner Radius", &d->inner_radius, 0.0f, 20.0f);
@@ -260,29 +411,7 @@ void draw_properties(Editor& ed) {
         ImGui::Checkbox("Emissive", &d->material.emissive);
     }
 
-    ImGui::SeparatorText("Orbit");
-    ImGui::Checkbox("Orbiting", &body.orbit.active);
-    if (body.orbit.active) {
-        // Parent picker as a body-name combo (excluding self).
-        const char* cur = (body.orbit.parent < 0)
-                              ? "(origin)"
-                              : ed.scene.bodies[body.orbit.parent].shape->name.c_str();
-        if (ImGui::BeginCombo("Parent", cur)) {
-            if (ImGui::Selectable("(origin)", body.orbit.parent < 0))
-                body.orbit.parent = -1;
-            for (int i = 0; i < static_cast<int>(ed.scene.bodies.size()); ++i) {
-                if (i == ed.selected) continue;
-                if (ImGui::Selectable(ed.scene.bodies[i].shape->name.c_str(),
-                                      body.orbit.parent == i))
-                    body.orbit.parent = i;
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::DragFloat("Orbit Radius", &body.orbit.radius, 0.1f, 0.0f, 1000.0f);
-        ImGui::DragFloat("Period (s)", &body.orbit.period, 0.1f, 0.01f, 100000.0f);
-        ImGui::SliderAngle("Phase", &body.orbit.phase);
-        ImGui::DragFloat3("Plane Normal", &body.orbit.normal.x, 0.05f);
-    }
+    orbit_controls(body.orbit, ed.scene.bodies, ed.selected);
 
     ImGui::SeparatorText("Spin (visible once textured)");
     ImGui::DragFloat3("Spin Axis", &body.spin.axis.x, 0.05f);
@@ -324,27 +453,47 @@ void add_sphere(Editor& ed) {
     ed.selected = static_cast<int>(ed.scene.bodies.size()) - 1;
 }
 
-void add_disk(Editor& ed) {
-    auto d = std::make_shared<Disk>(ed.cam.target, Vec3(0, 1, 0), 1.5f, 3.0f,
-                                    Material{Vec3(0.7f, 0.6f, 0.5f), false});
-    d->name = "Disk";
-    ed.scene.bodies.push_back(Body{d});
+void add_ring(Editor& ed) {
+    auto ring = std::make_shared<Disk>(ed.cam.target, Vec3(0, 1, 0), 1.5f, 3.0f,
+                                       Material{Vec3(0.7f, 0.6f, 0.5f), false});
+    ring->name = "Ring";
+    Body body{ring};
+
+    // If a sphere is selected, size the ring to it (1.2x / 1.4x its radius), sit it
+    // in the planet's equatorial plane, and attach it via a radius-0 orbit so it
+    // tracks the planet wherever it goes.
+    if (ed.selected >= 0 && ed.selected < static_cast<int>(ed.scene.bodies.size())) {
+        if (auto planet = std::dynamic_pointer_cast<Sphere>(ed.scene.bodies[ed.selected].shape)) {
+            ring->inner_radius = planet->radius * 1.2f;
+            ring->outer_radius = planet->radius * 1.4f;
+            ring->normal = planet->spin_axis;
+            ring->center = planet->center;
+            body.orbit.active = true;
+            body.orbit.parent = ed.selected;
+            body.orbit.radius = 0.0f;
+            body.orbit.normal = planet->spin_axis;
+        }
+    }
+    ed.scene.bodies.push_back(body);
     ed.selected = static_cast<int>(ed.scene.bodies.size()) - 1;
+}
+
+void delete_selected(Editor& ed) {
+    if (ed.selected < 0 || ed.selected >= static_cast<int>(ed.scene.bodies.size())) return;
+    ed.scene.bodies.erase(ed.scene.bodies.begin() + ed.selected);
+    ed.selected = SEL_NONE;
 }
 
 void draw_menu_bar(Editor& ed) {
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("Add")) {
             if (ImGui::MenuItem("Sphere")) add_sphere(ed);
-            if (ImGui::MenuItem("Disk")) add_disk(ed);
+            if (ImGui::MenuItem("Ring")) add_ring(ed);
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Object")) {
             const bool has_sel = ed.selected >= 0;
-            if (ImGui::MenuItem("Delete", "X", false, has_sel)) {
-                ed.scene.bodies.erase(ed.scene.bodies.begin() + ed.selected);
-                ed.selected = -1;
-            }
+            if (ImGui::MenuItem("Delete", "Del", false, has_sel)) delete_selected(ed);
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("View")) {
@@ -369,7 +518,8 @@ void draw_menu_bar(Editor& ed) {
     }
 }
 
-// Handle MMB orbit / shift+MMB pan / wheel zoom while the viewport image is hovered.
+// Right-drag orbits the view around the pivot; wheel zooms. (Left drag moves the
+// selected object instead — handled in the viewport.)
 void handle_navigation(Editor& ed, bool hovered) {
     if (!hovered || ed.look_through_camera) return;
     ImGuiIO& io = ImGui::GetIO();
@@ -378,22 +528,23 @@ void handle_navigation(Editor& ed, bool hovered) {
         ed.cam.distance = std::clamp(ed.cam.distance * std::pow(0.9f, io.MouseWheel),
                                      0.5f, 500.0f);
 
-    if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+    if (ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
         ImVec2 d = io.MouseDelta;
-        if (io.KeyShift) {
-            Vec3 right = cam_right(ed.cam.yaw);
-            Vec3 up = cross(right, cam_forward(ed.cam.yaw, ed.cam.pitch));
-            float k = ed.cam.distance * 0.002f;
-            ed.cam.target = ed.cam.target - right * (d.x * k) + up * (d.y * k);
-        } else {
-            ed.cam.yaw -= d.x * 0.01f;
-            ed.cam.pitch = std::clamp(ed.cam.pitch - d.y * 0.01f, -PI * 0.5f, PI * 0.5f);
-        }
+        ed.cam.yaw -= d.x * 0.01f;
+        ed.cam.pitch = std::clamp(ed.cam.pitch - d.y * 0.01f, -PI * 0.5f, PI * 0.5f);
     }
 }
 
 // Snapshot the selected body's editable values so a transform can be cancelled.
 void begin_transform(Editor& ed, XMode m) {
+    if (ed.selected == SEL_CAMERA) {
+        // A free camera can be grabbed; an orbiting one derives its position.
+        if (m != XMode::Grab || ed.scene.cam.orbit.active) return;
+        ed.xmode = m;
+        ed.x_start_mouse = ImGui::GetIO().MousePos;
+        ed.x_center = ed.scene.cam.position;
+        return;
+    }
     if (ed.selected < 0 || ed.selected >= static_cast<int>(ed.scene.bodies.size())) return;
     Body& b = ed.scene.bodies[ed.selected];
     if (m == XMode::Grab && b.orbit.active) return;  // orbiting bodies derive position
@@ -412,6 +563,11 @@ void begin_transform(Editor& ed, XMode m) {
 
 void cancel_transform(Editor& ed) {
     if (ed.xmode == XMode::None) return;
+    if (ed.selected == SEL_CAMERA) {
+        ed.scene.cam.position = ed.x_center;
+        ed.xmode = XMode::None;
+        return;
+    }
     Body& b = ed.scene.bodies[ed.selected];
     b.shape->center = ed.x_center;
     b.spin.axis = ed.x_spin;
@@ -428,18 +584,25 @@ void cancel_transform(Editor& ed) {
 // Drive the in-progress transform from the current mouse position.
 void update_transform(Editor& ed, const Camera& cam, const ScreenMap& map,
                       float region_h, float fov_deg, Vec3 posed_center) {
-    Body& b = ed.scene.bodies[ed.selected];
     ImVec2 mouse = ImGui::GetIO().MousePos;
     Projection pr = cam.project(posed_center);
     if (pr.depth <= 0.0f) return;
     ImVec2 cscr;
     map.to_screen(posed_center, cscr);
 
+    // Screen-drag -> world translation in the view plane (shared by grab paths).
+    float half = fov_deg * 0.5f * PI / 180.0f;
+    float wpp = 2.0f * pr.depth * std::tan(half) / region_h;  // world units per pixel
+    float dx = (mouse.x - ed.x_start_mouse.x) * wpp;
+    float dy = (mouse.y - ed.x_start_mouse.y) * wpp;
+
+    if (ed.selected == SEL_CAMERA) {  // only grab is offered for the camera
+        ed.scene.cam.position = ed.x_center + cam.right() * dx - cam.up() * dy;
+        return;
+    }
+
+    Body& b = ed.scene.bodies[ed.selected];
     if (ed.xmode == XMode::Grab) {
-        float half = fov_deg * 0.5f * PI / 180.0f;
-        float wpp = 2.0f * pr.depth * std::tan(half) / region_h;  // world units per pixel
-        float dx = (mouse.x - ed.x_start_mouse.x) * wpp;
-        float dy = (mouse.y - ed.x_start_mouse.y) * wpp;
         b.shape->center = ed.x_center + cam.right() * dx - cam.up() * dy;  // screen y is down
     } else if (ed.xmode == XMode::Scale) {
         float d0 = std::hypot(ed.x_start_mouse.x - cscr.x, ed.x_start_mouse.y - cscr.y);
@@ -502,41 +665,92 @@ void draw_viewport(Editor& ed) {
         if (!ed.scene.bodies[i].orbit.active) continue;
         draw_orbit(dl, map, ed.scene, i, ed.time, i == ed.selected ? COL_ORBIT_SEL : COL_ORBIT);
     }
-    bool sel_valid = ed.selected >= 0 && ed.selected < static_cast<int>(posed.size());
-    if (sel_valid) {
+    bool sel_body = ed.selected >= 0 && ed.selected < static_cast<int>(posed.size());
+    if (sel_body) {
         Body posed_body = ed.scene.bodies[ed.selected];
         posed_body.shape = posed[ed.selected];  // posed clone carries world center
         draw_selection_outline(dl, map, posed_body, active_fov(ed));
     }
 
-    // ---- Modal G/R/S transforms + Space to play/pause ---------------------
+    // Editor-only overlays: render-camera gizmo (+ its orbit), the scene-origin and
+    // view-pivot markers, and a corner axis indicator. None of this is raytraced.
+    bool sel_cam = ed.selected == SEL_CAMERA && !ed.look_through_camera;
+    if (!ed.look_through_camera) {
+        if (ed.scene.cam.orbit.active)
+            draw_camera_orbit(dl, map, ed.scene, ed.time,
+                              sel_cam ? COL_ORBIT_SEL : COL_ORBIT);
+        draw_camera_gizmo(dl, map, ed.scene, ed.time, sel_cam ? COL_OUTLINE : COL_CAMERA);
+        draw_marker(dl, map, Vec3(0, 0, 0), IM_COL32(210, 200, 90, 200), "O");  // scene center
+        draw_marker(dl, map, ed.cam.target, IM_COL32(90, 200, 210, 220), nullptr);  // look-at
+        draw_axis_gizmo(dl, cam, ImVec2(img_pos.x + 34, img_pos.y + region_h - 34));
+    }
+    bool can_xform = sel_body || sel_cam;
+
+    // ---- Keyboard: play, edit-camera views, R/S transforms, delete ---------
     ImGuiIO& io = ImGui::GetIO();
     if (ed.xmode == XMode::None && hovered && !io.WantTextInput) {
         if (ImGui::IsKeyPressed(ImGuiKey_Space)) ed.playing = !ed.playing;
-        if (sel_valid) {
-            if (ImGui::IsKeyPressed(ImGuiKey_G)) begin_transform(ed, XMode::Grab);
-            else if (ImGui::IsKeyPressed(ImGuiKey_R)) begin_transform(ed, XMode::Rotate);
+
+        // Edit-camera view controls (distinct from the render camera).
+        if (!ed.look_through_camera) {
+            if (ImGui::IsKeyPressed(ImGuiKey_X)) align_view(ed.cam, Vec3(-1, 0, 0));
+            else if (ImGui::IsKeyPressed(ImGuiKey_Y)) align_view(ed.cam, Vec3(0, -1, 0));
+            else if (ImGui::IsKeyPressed(ImGuiKey_Z)) align_view(ed.cam, Vec3(0, 0, -1));
+            if (ImGui::IsKeyPressed(ImGuiKey_C)) ed.cam.target = Vec3(0, 0, 0);
+            if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd))
+                ed.cam.distance = std::clamp(ed.cam.distance * 0.9f, 0.5f, 500.0f);
+            if (ImGui::IsKeyPressed(ImGuiKey_Minus) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract))
+                ed.cam.distance = std::clamp(ed.cam.distance / 0.9f, 0.5f, 500.0f);
+        }
+
+        // Rotate/Scale stay modal; Grab is replaced by plain left-drag (below).
+        if (can_xform) {
+            if (ImGui::IsKeyPressed(ImGuiKey_R)) begin_transform(ed, XMode::Rotate);
             else if (ImGui::IsKeyPressed(ImGuiKey_S)) begin_transform(ed, XMode::Scale);
         }
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete)) delete_selected(ed);
     }
 
-    bool consumed_release = false;
+    // ---- Left press: pick a body/camera, recenter the pivot on it, and start a
+    // drag-move (a release with no movement is just a selection click). ----------
+    if (ed.xmode == XMode::None && hovered &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        ImVec2 m = io.MousePos;
+        float s = (m.x - img_pos.x) / region_w;
+        float t = 1.0f - (m.y - img_pos.y) / region_h;
+        int picked = pick_body(ed, cam.get_ray(s, t));
+        ImVec2 cscr;  // the camera isn't geometry — pick it near its gizmo
+        if (!ed.look_through_camera &&
+            camera_screen_pos(map, ed.scene, ed.time, cscr) &&
+            std::hypot(m.x - cscr.x, m.y - cscr.y) < 14.0f)
+            picked = SEL_CAMERA;
+        ed.selected = picked;
+        if (picked == SEL_CAMERA)
+            ed.cam.target = camera_eye(ed.scene, ed.time);
+        else if (picked >= 0)
+            ed.cam.target = posed[picked]->center;  // pivot follows selection
+        begin_transform(ed, XMode::Grab);  // no-op for empty/orbiting picks
+    }
+
+    bool sel_valid = (ed.selected == SEL_CAMERA) ||
+                     (ed.selected >= 0 && ed.selected < static_cast<int>(posed.size()));
     if (ed.xmode != XMode::None) {
         if (!sel_valid) {
             ed.xmode = XMode::None;
         } else {
+            Vec3 xform_center = (ed.selected == SEL_CAMERA) ? camera_eye(ed.scene, ed.time)
+                                                            : posed[ed.selected]->center;
             update_transform(ed, cam, map, static_cast<float>(region_h), active_fov(ed),
-                             posed[ed.selected]->center);
-            dl->AddText(ImVec2(img_pos.x + 8, img_pos.y + 6), COL_OUTLINE,
-                        xmode_label(ed.xmode));
+                             xform_center);
+            if (ed.xmode != XMode::Grab)  // Grab is a live drag; only label modal R/S
+                dl->AddText(ImVec2(img_pos.x + 8, img_pos.y + 6), COL_OUTLINE,
+                            xmode_label(ed.xmode));
             if (ImGui::IsKeyPressed(ImGuiKey_Escape) ||
                 ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
                 cancel_transform(ed);
-                consumed_release = true;
             } else if (ImGui::IsKeyPressed(ImGuiKey_Enter) ||
                        ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                 ed.xmode = XMode::None;  // confirm: keep edited values
-                consumed_release = true;
             }
         }
     }
@@ -544,19 +758,10 @@ void draw_viewport(Editor& ed) {
     if (ed.xmode == XMode::None)
         handle_navigation(ed, hovered);
 
-    // Click to select (only a plain click, not a drag and not a transform confirm).
-    if (ed.xmode == XMode::None && !consumed_release && hovered &&
-        ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
-        !ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f)) {
-        ImVec2 m = io.MousePos;
-        float s = (m.x - img_pos.x) / region_w;
-        float t = 1.0f - (m.y - img_pos.y) / region_h;
-        ed.selected = pick_body(ed, cam.get_ray(s, t));
-    }
-
-    if (sel_valid && ed.xmode == XMode::None)
+    if (can_xform && ed.xmode == XMode::None)
         dl->AddText(ImVec2(img_pos.x + 8, img_pos.y + region_h - 22),
-                    IM_COL32(210, 210, 210, 150), "G move   R rotate   S scale");
+                    IM_COL32(210, 210, 210, 150),
+                    sel_cam ? "drag move" : "drag move   R rotate   S scale");
 
     ImGui::End();
 }

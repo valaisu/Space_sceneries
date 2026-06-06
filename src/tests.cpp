@@ -96,9 +96,8 @@ static void phase2() {
 static void phase3() {
     // Build a scene, serialize, parse back, and check the round-trip (5.2).
     Scene scene;
-    scene.cam_lookfrom = Vec3(0, 2, 3);
-    scene.cam_lookat = Vec3(0, 0, -1);
-    scene.cam_fov = 60.0f;
+    scene.cam.position = Vec3(0, 2, 3);
+    scene.cam.fov = 60.0f;
     scene.light_dir = Vec3(0, -1, -0.5f);
     scene.width = 320;
     scene.height = 240;
@@ -123,7 +122,7 @@ static void phase3() {
     Scene back = scene_from_json(scene_to_json(scene));
 
     // Scalars / vectors survive.
-    assert(approx(back.cam_lookfrom.y, 2.0f) && approx(back.cam_fov, 60.0f));
+    assert(approx(back.cam.position.y, 2.0f) && approx(back.cam.fov, 60.0f));
     assert(approx(back.light_dir.z, -0.5f));
     assert(back.width == 320 && back.height == 240);
 
@@ -150,9 +149,10 @@ static void phase5() {
     Scene scene;
     scene.width = 3;
     scene.height = 3;
-    scene.cam_lookfrom = Vec3(0, 0, 0);
-    scene.cam_lookat = Vec3(0, 0, -1);
-    scene.cam_fov = 90.0f;             // aspect 1
+    scene.cam.position = Vec3(0, 0, 0);
+    scene.cam.look = CamLook::Direction;
+    scene.cam.direction = Vec3(0, 0, -1);
+    scene.cam.fov = 90.0f;             // aspect 1
     scene.light_dir = Vec3(0, 0, -1);  // lights the camera-facing hemisphere
     scene.bodies.push_back(Body{std::make_shared<Sphere>(
         Vec3(0, 0, -5), 1.0f, Material{Vec3(0.8f, 0.3f, 0.3f), false})});
@@ -274,6 +274,40 @@ static void phase9() {
     assert(approx(rec.material.albedo.x, 0.3f) && approx(rec.material.albedo.z, 0.9f));
 }
 
+static void phase10() {
+    // Camera object: Target mode aims at a body; an orbit moves the eye; Direction
+    // mode faces a constant world direction regardless of position.
+    Scene scene;
+    auto star = std::make_shared<Sphere>(Vec3(0, 0, 0), 1.0f, Material{Vec3(1, 1, 1), true});
+    scene.bodies = {Body{star}};
+    scene.cam.position = Vec3(0, 0, 10);
+    scene.cam.look = CamLook::Target;
+    scene.cam.target = 0;  // look at the star at the origin
+
+    Camera c = scene_camera(scene, 0.0f, 1.0f);
+    Vec3 f = c.forward();  // from (0,0,10) toward origin -> -z
+    assert(approx(f.x, 0) && approx(f.y, 0) && approx(f.z, -1.0f));
+    assert(approx(c.eye().z, 10.0f));
+
+    // Orbit the camera (radius 5, XZ plane): +Z at t=0, +X a quarter period later.
+    scene.cam.orbit.active = true;
+    scene.cam.orbit.parent = -1;
+    scene.cam.orbit.radius = 5.0f;
+    scene.cam.orbit.period = 8.0f;
+    Vec3 e0 = camera_eye(scene, 0.0f);
+    assert(approx(e0.x, 0) && approx(e0.z, 5.0f));
+    Vec3 eq = camera_eye(scene, 2.0f);
+    assert(approx(eq.x, 5.0f) && approx(eq.z, 0.0f));
+
+    // Direction mode: constant facing, independent of position.
+    scene.cam.orbit.active = false;
+    scene.cam.position = Vec3(3, 0, 0);
+    scene.cam.look = CamLook::Direction;
+    scene.cam.direction = Vec3(0, 0, -1);
+    Vec3 fd = scene_camera(scene, 0.0f, 1.0f).forward();
+    assert(approx(fd.x, 0.0f) && approx(fd.z, -1.0f));
+}
+
 int main() {
     phase1();
     phase2();
@@ -282,6 +316,7 @@ int main() {
     phase6();
     phase7();
     phase9();
-    std::printf("Phase 1-3,5,6,7,9 sanity checks passed.\n");
+    phase10();
+    std::printf("Phase 1-3,5,6,7,9,10 sanity checks passed.\n");
     return 0;
 }

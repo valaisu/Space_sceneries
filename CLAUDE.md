@@ -40,7 +40,7 @@ Core math / geometry (header-only unless noted):
 - `camera.h` — LookAt `Camera`: `get_ray` (rays), `project` (world→screen, the exact inverse, used for overlays), and `right`/`up`/`forward` basis accessors (used by viewport transforms).
 - `motion.h` — `Orbit`, `Spin`, `Body` (a shape + its motion).
 - `render.h` / `render.cpp` — shading (`ray_color`: diffuse + hard shadow + ambient), `hit_world`, and `render_view` / `render_scene` (scene → RGBA8 pixel buffer).
-- `scene.h` / `scene.cpp` — `Scene`, JSON save/load, and posing (`body_world_pos`, `world_at_time`, `orbit_ring_point`).
+- `scene.h` / `scene.cpp` — `Scene`, `SceneCamera` (+ `CamLook`), JSON save/load, and posing (`body_world_pos`, `world_at_time`, `orbit_ring_point`, `camera_eye`, `scene_camera`).
 
 Executables:
 - `app.cpp` — the editor (ImGui + GLFW + OpenGL). **GUI-only.**
@@ -55,11 +55,21 @@ Executables:
 
 ## Architecture
 
-**Scene model.** A `Scene` holds `std::vector<Body>`, the render camera (stored as
-authoring params, not a built `Camera`), the directional `light_dir`, and the
-output `width`/`height`. A `Body` is a `shape` (`Sphere`/`Disk`) plus an `Orbit`
-and a `Spin`. There are **no separate Planet/Moon types** — those are just spheres
-with a name and material.
+**Scene model.** A `Scene` holds `std::vector<Body>`, a `SceneCamera`, the
+directional `light_dir`, and the output `width`/`height`. A `Body` is a `shape`
+(`Sphere`/`Disk`) plus an `Orbit` and a `Spin`. There are **no separate Planet/Moon
+types** — those are just spheres with a name and material. The `Disk` primitive
+doubles as a **ring** (annulus via `inner_radius`); the editor's Add menu exposes it
+as "Ring".
+
+**Camera as an object.** The render camera is a `SceneCamera`: a movable, orbitable
+scene object (not just authoring params). It has a `position` *or* an `Orbit`
+(reusing the body machinery, so it can circle a parent body), an FOV, a `vup`, and a
+`CamLook` policy deciding where it aims — `Direction` (a constant world facing),
+`Target` (track a body, or the world origin), or `Spin` (rotate at a constant rate
+about `vup`). `scene_camera(scene, t, aspect)` poses it at time `t` (resolving orbit
++ look mode) into a built `Camera`; `camera_eye(scene, t)` gives just the eye. It is
+drawn as a frustum gizmo in the editor but **never raytraced**.
 
 **Motion (time-based posing).** Orbits are circular: a body orbits a parent body
 (or the world origin) in the plane defined by `Orbit::normal`, with radius / period
@@ -83,15 +93,23 @@ background. Output is RGBA8, one `uint32_t` per pixel, **row 0 = top**.
 
 **Editor (`app.cpp`).** Blender-style single-viewport layout: top menu bar +
 central viewport + contextual Properties panel (right) + Timeline strip (bottom).
-The viewport **continuously, coarsely raytraces** a navigable editor camera
-(default top-down; MMB-orbit / Shift+MMB-pan / scroll-zoom). Click selects a body
-(ray-pick); the selection shows an orange outline plus its orbit path, drawn with
-ImGui's draw list using `Camera::project`. **G/R/S** start Blender-style modal
-transforms (grab/rotate/scale) on the selection — move the mouse, left-click/Enter
-to confirm, right-click/Esc to cancel. The Timeline has Play/Pause (also **Space**),
-speed, and a time scrubber; while playing, `time` advances by frame delta so orbits
-and spin animate. View ▸ "Look through camera" renders from the scene's render
-camera; Export PNG renders that camera at full resolution.
+The viewport **continuously, coarsely raytraces** a navigable *edit* camera — a
+distinct concept from the scene's *render* camera (the `OrbitCam` is a yaw/pitch/
+distance orbit rig with no orbit/look-mode of its own). Its controls are **not** the
+Blender defaults (intentionally): **left-drag moves the selected object** (Grab has
+no separate `G` key), **right-drag orbits** the view, wheel or **`+`/`-`** zoom,
+**`X`/`Y`/`Z`** align the view down a world axis, **`C`** recenters the pivot on the
+scene origin, and **`Delete`** removes the selection. There's no panning. Selecting
+an object (left-click ray-pick, or click the render camera's frustum gizmo →
+`selected == SEL_CAMERA == -2`) recenters the edit-camera pivot on it. Overlays
+(ImGui draw list via `Camera::project`): an orange outline + orbit path on the
+selection, the render-camera frustum gizmo, a scene-origin marker ("O") and a
+view-pivot crosshair, and a corner **X/Y/Z axis gizmo**. **R/S** are still modal
+Blender transforms (rotate/scale) — move the mouse, left-click/Enter to confirm,
+right-click/Esc to cancel. The Timeline has Play/Pause (also **Space**), speed, and
+a time scrubber; while playing, `time` advances by frame delta so orbits and spin
+animate. View ▸ "Look through camera" renders from the scene's render camera; Export
+PNG renders that camera at full resolution.
 
 ## Conventions & gotchas
 
@@ -103,11 +121,15 @@ camera; Export PNG renders that camera at full resolution.
   (relied on by ImGui `DragFloat3`/`ColorEdit3` and the projection math). Don't add
   virtuals to `Vec3`.
 - **Orbiting bodies ignore their shape's `center`** — position comes from the orbit,
-  so the inspector hides Position while a body is orbiting. Grab (G) is likewise
-  disabled for orbiting bodies.
+  so the inspector hides Position while a body is orbiting. Drag-move is likewise
+  disabled for orbiting bodies (and for an orbiting render camera).
+- **Adding a Ring** around a selected sphere sizes it to 1.2×/1.4× the planet radius,
+  lays it in the planet's equatorial plane (`normal = spin_axis`), and attaches it
+  with a **radius-0 orbit** parented to the planet so it tracks the planet.
 - **Rotate (R) acts on the object's orientation:** a disk's `normal`, or a sphere's
   `spin.axis` (visible on textured spheres as they spin). Scale (S) drives sphere
   radius / disk radii.
-- **Editor preference: when a UI detail is unspecified, do it the Blender way**
-  (single live viewport, contextual panels, select → outline + orbit, G/R/S transforms).
+- **Editor preference: when a UI detail is unspecified, do it the Blender way** —
+  *except* the edit-camera navigation, which the user deliberately customized
+  (left-drag move, right-drag orbit, `+`/`-`/`X`/`Y`/`Z`/`C`, no pan).
 - **Phase numbering** in `initial_ideas.md`: section N corresponds to phase N−2.
