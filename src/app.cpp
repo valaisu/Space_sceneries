@@ -82,6 +82,7 @@ struct Editor {
     float play_speed = 1.0f;
     OrbitCam cam;
     bool look_through_camera = false;
+    ShadeMode shade_mode = ShadeMode::Lit;  // viewport display mode (export is always Lit)
 
     GLuint tex = 0;
     std::vector<uint32_t> pixels;
@@ -118,6 +119,7 @@ Scene make_default_scene() {
     s.cam.fov = 50.0f;
     s.cam.look = CamLook::Target;
     s.cam.target = 0;  // track the Sun
+    generate_palette(s.post);  // Stage 3: a starting harmonic palette (enabled by default)
     return s;
 }
 
@@ -365,6 +367,25 @@ void draw_camera_properties(Editor& ed) {
 
     orbit_controls(c.orbit, ed.scene.bodies, -1);
 }
+// Editor for a list of color stops (ring gradient / texture ramp). `add_color`
+// is the color a freshly added stop gets.
+void ramp_editor(std::vector<ColorStop>& ramp, Vec3 add_color) {
+    int remove = -1;
+    for (int k = 0; k < static_cast<int>(ramp.size()); ++k) {
+        ImGui::PushID(k);
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::SliderFloat("Pos", &ramp[k].pos, 0.0f, 1.0f);
+        ImGui::SameLine();
+        ImGui::ColorEdit3("##col", &ramp[k].color.x, ImGuiColorEditFlags_NoInputs);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X")) remove = k;
+        ImGui::PopID();
+    }
+    if (remove >= 0) ramp.erase(ramp.begin() + remove);
+    if (ImGui::SmallButton("Add stop"))
+        ramp.push_back({ramp.empty() ? 0.0f : 1.0f, add_color});
+}
+
 void draw_properties(Editor& ed) {
     ImGui::Begin("Properties", nullptr, PANEL_FLAGS);
     if (ed.selected == SEL_CAMERA) {
@@ -375,6 +396,49 @@ void draw_properties(Editor& ed) {
     if (ed.selected < 0 || ed.selected >= static_cast<int>(ed.scene.bodies.size())) {
         ImGui::TextWrapped("Nothing selected. Click an object in the viewport, "
                            "or use the Add menu to create one.");
+        ImGui::SeparatorText("Lighting");
+        ImGui::TextWrapped("Suns (emissive bodies) light the scene in Lit mode.");
+        ImGui::DragFloat3("Fill light dir", &ed.scene.light_dir.x, 0.05f);
+        ImGui::Checkbox("Include fill in Lit", &ed.scene.fill_light);
+        ImGui::Checkbox("Sun distance falloff", &ed.scene.light_falloff);
+
+        Background& bg = ed.scene.background;
+        ImGui::SeparatorText("Background (starfield)");
+        ImGui::ColorEdit3("Sky", &bg.sky.x);
+        ImGui::SliderFloat("Density", &bg.density, 0.0f, 1.0f);
+        ImGui::SliderFloat("Brightness", &bg.brightness, 0.0f, 4.0f);
+        ImGui::SliderFloat("Star size", &bg.size, 0.01f, 0.5f);
+        ImGui::ColorEdit3("Star tint", &bg.tint.x);
+        ImGui::SliderFloat("Color variation", &bg.color_variation, 0.0f, 1.0f);
+        ImGui::InputInt("Seed", &bg.seed);
+
+        PostProcess& pp = ed.scene.post;
+        ImGui::SeparatorText("Stylize (palette post-process)");
+        ImGui::Checkbox("Enabled", &pp.enabled);
+        ImGui::ColorEdit3("Base A", &pp.base_a.x);
+        ImGui::ColorEdit3("Base B", &pp.base_b.x);
+        ImGui::SliderInt("Palette size", &pp.palette_size, 2, 32);
+        if (ImGui::Button("Generate palette")) generate_palette(pp);
+
+        int rm = -1;
+        for (int k = 0; k < static_cast<int>(pp.palette.size()); ++k) {
+            ImGui::PushID(k);
+            ImGui::ColorEdit3("##sw", &pp.palette[k].x, ImGuiColorEditFlags_NoInputs);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) rm = k;
+            if ((k % 6) != 5 && k + 1 < static_cast<int>(pp.palette.size()))
+                ImGui::SameLine();
+            ImGui::PopID();
+        }
+        if (rm >= 0) pp.palette.erase(pp.palette.begin() + rm);
+        if (ImGui::SmallButton("Add swatch")) pp.palette.push_back(Vec3(1, 1, 1));
+
+        ImGui::SliderFloat("Blur radius", &pp.blur_radius, 0.0f, 5.0f);
+        const char* dither[] = {"None", "Ordered (Bayer)", "Random"};
+        int dm = static_cast<int>(pp.dither);
+        if (ImGui::Combo("Dither", &dm, dither, 3)) pp.dither = static_cast<DitherMode>(dm);
+        ImGui::SliderInt("Iterations", &pp.iterations, 1, 4);
+
         ImGui::End();
         return;
     }
@@ -394,12 +458,29 @@ void draw_properties(Editor& ed) {
         if (!orbiting) ImGui::DragFloat3("Position", &s->center.x, 0.1f);
         ImGui::SliderFloat("Radius", &s->radius, 0.05f, 20.0f);
         ImGui::SeparatorText("Material");
-        ImGui::ColorEdit3("Albedo", &s->material.albedo.x);
-        ImGui::Checkbox("Emissive", &s->material.emissive);
-        const char* patterns[] = {"Solid", "Stripes", "Mottled"};
-        ImGui::Combo("Pattern", &s->material.pattern, patterns, 3);
-        if (s->material.pattern != 0)
-            ImGui::ColorEdit3("Detail", &s->material.detail.x);
+        Material& m = s->material;
+        ImGui::ColorEdit3("Albedo", &m.albedo.x);
+        ImGui::Checkbox("Emissive", &m.emissive);
+        bool textured = m.pattern != 0;
+        if (ImGui::Checkbox("Textured", &textured)) m.pattern = textured ? 1 : 0;
+        if (m.pattern != 0) {
+            ImGui::SliderFloat("Noise scale", &m.noise_scale, 0.5f, 16.0f);
+            ImGui::SliderInt("Octaves", &m.noise_octaves, 1, 8);
+            ImGui::SliderFloat("Band strength", &m.band_strength, 0.0f, 1.0f);
+            ImGui::SliderFloat("Band freq", &m.band_freq, 1.0f, 30.0f);
+            ImGui::SliderFloat("Warp", &m.warp, 0.0f, 2.0f);
+            ImGui::SeparatorText("Surface colors");
+            ramp_editor(m.tex_ramp, m.albedo);
+            if (m.tex_ramp.empty()) ImGui::ColorEdit3("Detail", &m.detail.x);
+        }
+        ImGui::SeparatorText("Atmosphere");
+        ImGui::Checkbox("Has atmosphere", &m.atmosphere.enabled);
+        if (m.atmosphere.enabled) {
+            ImGui::ColorEdit3("Day color", &m.atmosphere.color.x);
+            ImGui::ColorEdit3("Sunset color", &m.atmosphere.sunset.x);
+            ImGui::SliderFloat("Thickness", &m.atmosphere.thickness, 0.0f, 1.0f);
+            ImGui::SliderFloat("Intensity", &m.atmosphere.intensity, 0.0f, 3.0f);
+        }
     } else if (auto d = std::dynamic_pointer_cast<Disk>(obj)) {
         ImGui::TextUnformatted("Ring");
         if (!orbiting) ImGui::DragFloat3("Position", &d->center.x, 0.1f);
@@ -409,6 +490,10 @@ void draw_properties(Editor& ed) {
         ImGui::SeparatorText("Material");
         ImGui::ColorEdit3("Albedo", &d->material.albedo.x);
         ImGui::Checkbox("Emissive", &d->material.emissive);
+
+        ImGui::SeparatorText("Color ramp (inner -> outer)");
+        if (d->material.ring_ramp.empty()) ImGui::TextDisabled("Solid (uses Albedo)");
+        ramp_editor(d->material.ring_ramp, d->material.albedo);
     }
 
     orbit_controls(body.orbit, ed.scene.bodies, ed.selected);
@@ -498,6 +583,16 @@ void draw_menu_bar(Editor& ed) {
         }
         if (ImGui::BeginMenu("View")) {
             ImGui::MenuItem("Look through camera", "Numpad 0", &ed.look_through_camera);
+            if (ImGui::BeginMenu("Display mode")) {
+                int m = static_cast<int>(ed.shade_mode);
+                if (ImGui::RadioButton("Direction (flat directional)", &m, 0))
+                    ed.shade_mode = ShadeMode::Direction;
+                if (ImGui::RadioButton("In-between (sun dir, no shadows)", &m, 1))
+                    ed.shade_mode = ShadeMode::InBetween;
+                if (ImGui::RadioButton("Lit (suns + shadows, = export)", &m, 2))
+                    ed.shade_mode = ShadeMode::Lit;
+                ImGui::EndMenu();
+            }
             if (ImGui::MenuItem("Top")) { ed.cam.pitch = -PI * 0.5f; ed.cam.yaw = 0; }
             if (ImGui::MenuItem("Front")) { ed.cam.pitch = 0; ed.cam.yaw = 0; }
             if (ImGui::MenuItem("Side")) { ed.cam.pitch = 0; ed.cam.yaw = PI * 0.5f; }
@@ -647,7 +742,7 @@ void draw_viewport(Editor& ed) {
     int rw = std::clamp(region_w / 3, 80, 480);
     int rh = std::max(1, static_cast<int>(rw / aspect));
     Camera cam = active_camera(ed, aspect);
-    render_view(ed.scene, cam, ed.time, rw, rh, ed.pixels);
+    render_view(ed.scene, cam, ed.time, rw, rh, ed.pixels, ed.shade_mode);
     upload_texture(ed, rw, rh);
 
     ImVec2 img_pos = ImGui::GetCursorScreenPos();

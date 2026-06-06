@@ -23,3 +23,10 @@ public:
         return std::make_shared<Sphere>(*this);
     }
 };
+
+// Stage 4: procedural surface texture, sampled in 3D object space (no pole
+// pinching). `surface_field` returns a scalar in [0,1] at a unit body-local
+// point; `surface_color` maps that field to an albedo via the material's
+// tex_ramp (or albedo<->detail when the ramp is empty). Exposed for testing.
+float surface_field(const Material& m, Vec3 local_unit);
+Vec3 surface_color(const Material& m, float field);
