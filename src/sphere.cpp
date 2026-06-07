@@ -109,6 +109,39 @@ float storm_weight(const Material& m, Vec3 p) {
     return best * std::clamp(m.storm, 0.0f, 1.0f);
 }
 
+float crater_shade(const Craters& c, Vec3 p) {
+    if (!c.enabled) return 1.0f;
+    // Cellular (Worley) layout: scale the point into a grid, then over the 3x3x3
+    // neighbourhood find the nearest jittered feature point that actually holds a
+    // crater. p is a unit vector, so this tiles the sphere with no seam/pole pinch.
+    Vec3 q = p * c.density + Vec3(static_cast<float>(c.seed) * 0.123f, 0.0f, 0.0f);
+    float xi = std::floor(q.x), yi = std::floor(q.y), zi = std::floor(q.z);
+    float xf = q.x - xi, yf = q.y - yi, zf = q.z - zi;
+    float best_d = 1e9f, best_r = 0.0f;
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                float cx = xi + dx, cy = yi + dy, cz = zi + dz;
+                if (hash31(cx + 3.7f, cy + 9.1f, cz + 13.3f) < 0.45f) continue;  // empty cell
+                float jx = hash31(cx, cy, cz);
+                float jy = hash31(cx + 31.4f, cy + 17.7f, cz + 5.3f);
+                float jz = hash31(cx + 11.1f, cy + 47.3f, cz + 23.9f);
+                float fx = dx + jx - xf, fy = dy + jy - yf, fz = dz + jz - zf;
+                float d = std::sqrt(fx * fx + fy * fy + fz * fz);
+                if (d < best_d) {
+                    best_d = d;
+                    best_r = 0.25f + 0.2f * hash31(cx + 1.3f, cy + 2.7f, cz + 3.9f);  // radius
+                }
+            }
+    if (best_r <= 0.0f || best_d > best_r) return 1.0f;  // plains between craters
+    float t = best_d / best_r;  // 0 at the centre .. 1 at the rim
+    // Bowl: darken the floor, brighten a thin raised rim just inside the edge.
+    float floor_dark = -0.5f * (1.0f - t);
+    float u = (t - 0.88f) / 0.10f;
+    float rim = std::exp(-u * u);
+    return std::clamp(1.0f + c.strength * (floor_dark + 0.6f * rim), 0.2f, 1.4f);
+}
+
 Vec3 terrain_color(const Material& m, Vec3 p, float season_swing) {
     const Terrain& t = m.terrain;
     // Posterize a [0,1] value into `t.levels` flat steps so colored regions get crisp
@@ -175,14 +208,24 @@ bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
     // at the un-spun body-local point (no pole pinch), so it rotates with spin.
     if (material.pattern != 0) {
         Vec3 ln = rotate_about(rec.normal, spin_axis, -spin_angle);
-        rec.material.albedo = material.terrain.enabled
-            ? terrain_color(material, ln, season_swing)
-            : surface_color(material, surface_field(material, ln));
-        // Gas-giant storms: oval vortices blended over the banded surface.
-        if (material.storm > 0.0f) {
-            float w = storm_weight(material, ln);
-            rec.material.albedo = rec.material.albedo * (1.0f - w) + material.storm_color * w;
+        if (material.terrain.enabled) {
+            rec.material.albedo = terrain_color(material, ln, season_swing);
+        } else {
+            // Gas-giant bands sample at a (possibly) drifting angle so belts/storms
+            // slide slowly over time; rocky surfaces use the plain spin angle.
+            Vec3 bn = (material.band_drift != 0.0f)
+                          ? rotate_about(rec.normal, spin_axis, -band_angle)
+                          : ln;
+            rec.material.albedo = surface_color(material, surface_field(material, bn));
+            // Gas-giant storms: oval vortices blended over the banded surface.
+            if (material.storm > 0.0f) {
+                float w = storm_weight(material, bn);
+                rec.material.albedo = rec.material.albedo * (1.0f - w) + material.storm_color * w;
+            }
         }
+        // Impact craters (airless rocky bodies): bowl shading over the base albedo.
+        if (material.craters.enabled)
+            rec.material.albedo = rec.material.albedo * crater_shade(material.craters, ln);
     }
     // Cloud layer: a second translucent fbm texture composited over the base.
     if (material.clouds.enabled) {

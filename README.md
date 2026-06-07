@@ -10,8 +10,8 @@ the final image toward deliberate pixel-art color.
 ## What you can make
 
 - **Planets and moons** — spheres with procedural 3D textures (fbm noise, warped
-  latitude bands for gas giants), translucent **cloud** layers, and Fresnel-limb
-  **atmospheres**.
+  latitude bands for gas giants that slowly **drift**, **impact craters** on airless
+  rocky worlds), translucent **cloud** layers, and Fresnel-limb **atmospheres**.
 - **Rings** — translucent annular disks with radial color ramps, lit from either face.
 - **Suns** — emissive bodies that act as the scene's lights (with hard shadows and
   optional inverse-square falloff).

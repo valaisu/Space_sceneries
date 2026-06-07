@@ -45,6 +45,7 @@ json to_json(const Material& m) {
            {"band_strength", m.band_strength}, {"band_freq", m.band_freq},
            {"band_var", m.band_var}, {"warp", m.warp},
            {"band_levels", m.band_levels}, {"turbulence", m.turbulence},
+           {"band_drift", m.band_drift},
            {"storm", m.storm}, {"storm_seed", m.storm_seed},
            {"storm_color", to_json(m.storm_color)}};
     if (!m.ring_ramp.empty()) j["ring_ramp"] = ramp_to_json(m.ring_ramp);
@@ -56,6 +57,10 @@ json to_json(const Material& m) {
                             {"cap", tr.cap}, {"cap_color", to_json(tr.cap_color)},
                             {"cap_season", tr.cap_season},
                             {"season_period", tr.season_period}};
+    const Craters& cr = m.craters;
+    if (cr.enabled)
+        j["craters"] = json{{"enabled", cr.enabled}, {"density", cr.density},
+                            {"strength", cr.strength}, {"seed", cr.seed}};
     const Atmosphere& a = m.atmosphere;
     if (a.enabled)
         j["atmosphere"] = json{{"enabled", a.enabled}, {"color", to_json(a.color)},
@@ -85,6 +90,7 @@ Material material_from_json(const json& j) {
     m.warp = j.value("warp", m.warp);
     m.band_levels = j.value("band_levels", m.band_levels);
     m.turbulence = j.value("turbulence", m.turbulence);
+    m.band_drift = j.value("band_drift", m.band_drift);
     m.storm = j.value("storm", m.storm);
     m.storm_seed = j.value("storm_seed", m.storm_seed);
     if (j.contains("storm_color")) m.storm_color = vec3_from_json(j.at("storm_color"));
@@ -100,6 +106,13 @@ Material material_from_json(const json& j) {
         if (t.contains("cap_color")) m.terrain.cap_color = vec3_from_json(t.at("cap_color"));
         m.terrain.cap_season = t.value("cap_season", m.terrain.cap_season);
         m.terrain.season_period = t.value("season_period", m.terrain.season_period);
+    }
+    if (j.contains("craters")) {
+        const json& cr = j.at("craters");
+        m.craters.enabled = cr.value("enabled", false);
+        m.craters.density = cr.value("density", m.craters.density);
+        m.craters.strength = cr.value("strength", m.craters.strength);
+        m.craters.seed = cr.value("seed", m.craters.seed);
     }
     if (j.contains("atmosphere")) {
         const json& a = j.at("atmosphere");
@@ -304,6 +317,87 @@ Body body_from_json(const json& j) {
     return b;
 }
 
+json to_json(const SystemGenParams& p) {
+    return json{
+        {"seed", p.seed}, {"planet_count", p.planet_count}, {"max_moons", p.max_moons},
+        {"spacing", p.spacing}, {"sun_radius", p.sun_radius}, {"inclination", p.inclination},
+        {"eccentricity", p.eccentricity}, {"rings", p.rings}, {"atmospheres", p.atmospheres},
+        {"gas_ratio", p.gas_ratio}, {"hero_kind", p.hero_kind},
+        {"gas_storm_chance", p.gas_storm_chance}, {"gas_storm_strength", p.gas_storm_strength},
+        {"gas_belt_count", p.gas_belt_count}, {"gas_belt_var", p.gas_belt_var},
+        {"gas_turbulence", p.gas_turbulence}, {"gas_swirl", p.gas_swirl}, {"gas_drift", p.gas_drift},
+        {"spin_speed", p.spin_speed}, {"axial_tilt", p.axial_tilt},
+        {"extreme_tilt_chance", p.extreme_tilt_chance},
+        {"water_chance", p.water_chance}, {"exotic_chance", p.exotic_chance},
+        {"biome_chance", p.biome_chance}, {"cap_chance", p.cap_chance},
+        {"frozen_chance", p.frozen_chance}, {"season_chance", p.season_chance},
+        {"cloud_chance", p.cloud_chance}, {"crater_chance", p.crater_chance},
+        {"ring_chance", p.ring_chance}, {"ring_colors", p.ring_colors},
+        {"atmosphere_chance", p.atmosphere_chance}, {"moon_cap_chance", p.moon_cap_chance},
+        {"sun_texture_chance", p.sun_texture_chance}};
+}
+
+SystemGenParams gen_params_from_json(const json& j) {
+    SystemGenParams p;  // defaults for any missing key (old files)
+    p.seed = j.value("seed", p.seed);
+    p.planet_count = j.value("planet_count", p.planet_count);
+    p.max_moons = j.value("max_moons", p.max_moons);
+    p.spacing = j.value("spacing", p.spacing);
+    p.sun_radius = j.value("sun_radius", p.sun_radius);
+    p.inclination = j.value("inclination", p.inclination);
+    p.eccentricity = j.value("eccentricity", p.eccentricity);
+    p.rings = j.value("rings", p.rings);
+    p.atmospheres = j.value("atmospheres", p.atmospheres);
+    p.gas_ratio = j.value("gas_ratio", p.gas_ratio);
+    p.hero_kind = j.value("hero_kind", p.hero_kind);
+    p.gas_storm_chance = j.value("gas_storm_chance", p.gas_storm_chance);
+    p.gas_storm_strength = j.value("gas_storm_strength", p.gas_storm_strength);
+    p.gas_belt_count = j.value("gas_belt_count", p.gas_belt_count);
+    p.gas_belt_var = j.value("gas_belt_var", p.gas_belt_var);
+    p.gas_turbulence = j.value("gas_turbulence", p.gas_turbulence);
+    p.gas_swirl = j.value("gas_swirl", p.gas_swirl);
+    p.gas_drift = j.value("gas_drift", p.gas_drift);
+    p.spin_speed = j.value("spin_speed", p.spin_speed);
+    p.axial_tilt = j.value("axial_tilt", p.axial_tilt);
+    p.extreme_tilt_chance = j.value("extreme_tilt_chance", p.extreme_tilt_chance);
+    p.water_chance = j.value("water_chance", p.water_chance);
+    p.exotic_chance = j.value("exotic_chance", p.exotic_chance);
+    p.biome_chance = j.value("biome_chance", p.biome_chance);
+    p.cap_chance = j.value("cap_chance", p.cap_chance);
+    p.frozen_chance = j.value("frozen_chance", p.frozen_chance);
+    p.season_chance = j.value("season_chance", p.season_chance);
+    p.cloud_chance = j.value("cloud_chance", p.cloud_chance);
+    p.crater_chance = j.value("crater_chance", p.crater_chance);
+    p.ring_chance = j.value("ring_chance", p.ring_chance);
+    p.ring_colors = j.value("ring_colors", p.ring_colors);
+    p.atmosphere_chance = j.value("atmosphere_chance", p.atmosphere_chance);
+    p.moon_cap_chance = j.value("moon_cap_chance", p.moon_cap_chance);
+    p.sun_texture_chance = j.value("sun_texture_chance", p.sun_texture_chance);
+    return p;
+}
+
+json to_json(const EditorSettings& e) {
+    return json{{"gen", to_json(e.gen)},
+                {"scene_seconds", e.scene_seconds}, {"cam_loops", e.cam_loops},
+                {"pal_transition", e.pal_transition}, {"infinite_mode", e.infinite_mode},
+                {"play_speed", e.play_speed},
+                {"shade_mode", static_cast<int>(e.shade_mode)},
+                {"show_orbits", e.show_orbits}};
+}
+
+EditorSettings editor_settings_from_json(const json& j) {
+    EditorSettings e;
+    if (j.contains("gen")) e.gen = gen_params_from_json(j.at("gen"));
+    e.scene_seconds = j.value("scene_seconds", e.scene_seconds);
+    e.cam_loops = j.value("cam_loops", e.cam_loops);
+    e.pal_transition = j.value("pal_transition", e.pal_transition);
+    e.infinite_mode = j.value("infinite_mode", e.infinite_mode);
+    e.play_speed = j.value("play_speed", e.play_speed);
+    e.shade_mode = static_cast<ShadeMode>(j.value("shade_mode", static_cast<int>(e.shade_mode)));
+    e.show_orbits = j.value("show_orbits", e.show_orbits);
+    return e;
+}
+
 // Offset from the parent (which sits at a focus) for an explicit eccentric anomaly
 // E, in the orbital plane. With eccentricity 0 this is a circle of radius `radius`
 // and E is just the angle — reproducing the old circular orbit exactly.
@@ -381,6 +475,17 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
 
     // --- Sun (body 0): the light source ---
     Material sun_mat{Vec3(1.0f, rf(0.85f, 0.97f), rf(0.45f, 0.7f)), true};
+    if (u01(rng) < p.sun_texture_chance) {  // faint granulation, sometimes soft banding
+        sun_mat.pattern = 1;
+        sun_mat.noise_scale = rf(4.0f, 8.0f);
+        sun_mat.noise_octaves = 4;
+        Vec3 cool = sun_mat.albedo * rf(0.78f, 0.9f);  // slightly darker mottle
+        sun_mat.tex_ramp = {{0.0f, cool}, {1.0f, sun_mat.albedo}};
+        if (u01(rng) < 0.4f) {  // sometimes faint latitude banding instead of pure mottle
+            sun_mat.band_strength = rf(0.2f, 0.4f);
+            sun_mat.band_freq = rf(3.0f, 7.0f);
+        }
+    }
     auto sun = std::make_shared<Sphere>(Vec3(0, 0, 0), p.sun_radius, sun_mat);
     sun->name = "Sun";
     bodies.push_back(Body{sun});
@@ -420,6 +525,7 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
             m.band_var = std::min(1.3f, p.gas_belt_var * rf(0.6f, 1.4f));  // uneven WIDTHS
             m.warp = p.gas_swirl * rf(0.4f, 1.6f);        // swirl (calm keeps belts as belts)
             m.turbulence = p.gas_turbulence * rf(0.6f, 1.4f);  // zonal belt-edge filaments
+            m.band_drift = p.gas_drift * rf(-1.0f, 1.0f);      // belts slide slowly over time
             // Each belt samples its own color along the ramp; usually free (0), some-
             // times snapped to a small set of distinct shades.
             m.band_levels = (u01(rng) < 0.35f) ? ri(4, 8) : 0;
@@ -480,9 +586,13 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
             if (caproll > p.cap_chance) tr.cap = 1.1f;             // no caps
             else if (caproll < p.frozen_chance) tr.cap = rf(0.3f, 0.5f);  // frozen: big caps
             else tr.cap = rf(0.5f, 0.9f);                          // varied, often clearly visible
-            tr.cap_color = (u01(rng) < 0.75f)
-                ? Vec3(rf(0.88f, 0.97f), rf(0.92f, 0.98f), 1.0f)            // white-blue ice
-                : Vec3(rf(0.85f, 0.97f), rf(0.7f, 0.85f), rf(0.6f, 0.8f));  // tinted (dust/CO2)
+            float caphue = u01(rng);  // a spread of cap tints, not just white
+            tr.cap_color =
+                (caphue < 0.5f)  ? Vec3(rf(0.88f, 0.97f), rf(0.92f, 0.98f), 1.0f)            // white-blue ice
+              : (caphue < 0.7f)  ? Vec3(rf(0.85f, 0.97f), rf(0.7f, 0.85f), rf(0.55f, 0.75f)) // warm dust / CO2
+              : (caphue < 0.85f) ? Vec3(rf(0.6f, 0.78f),  rf(0.78f, 0.9f),  rf(0.92f, 1.0f)) // pale cyan
+              : exotic           ? hsv(u01(rng), rf(0.2f, 0.45f), rf(0.9f, 1.0f))            // alien tint
+                                 : Vec3(rf(0.92f, 1.0f), rf(0.82f, 0.92f), rf(0.85f, 0.95f)); // faint pink-white
             if (tr.cap < 1.0f && u01(rng) < p.season_chance) {  // capped worlds breathe seasons
                 tr.cap_season = rf(0.06f, 0.18f);
                 tr.season_period = rf(20.0f, 60.0f);
@@ -510,6 +620,14 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
             m.atmosphere.thickness = rf(0.3f, 0.6f);
             m.atmosphere.intensity = rf(0.6f, 1.3f);
         }
+        // Airless rocky worlds get impact craters (gas giants and worlds with an
+        // atmosphere keep a smooth surface).
+        if (!gas && !m.atmosphere.enabled && u01(rng) < p.crater_chance) {
+            m.craters.enabled = true;
+            m.craters.density = rf(3.0f, 7.0f);
+            m.craters.strength = rf(0.35f, 0.7f);
+            m.craters.seed = ri(1, 9999);
+        }
 
         auto sph = std::make_shared<Sphere>(Vec3(0, 0, 0), prad, m);
         sph->name = (gas ? "Gas Giant " : "Planet ") + std::to_string(i + 1);
@@ -527,6 +645,9 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
             Vec3 ax(std::cos(az), 0.0f, std::sin(az));
             float ang = rf(75.0f, 105.0f) * TWO_PI / 360.0f;
             b.spin.axis = normalize(rotate_about(Vec3(0, 1, 0), ax, ang));
+            // Tipped on its side, the "poles" face the orbital plane, so static polar
+            // ice caps make no physical sense — drop them on extreme-tilt worlds.
+            sph->material.terrain.cap = 1.1f;
         }
         b.spin.period = rf(3.0f, 10.0f) * (gas ? 0.6f : 1.0f) / std::max(0.05f, p.spin_speed);
         planet_idx[i] = static_cast<int>(bodies.size());
@@ -541,8 +662,18 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
         float inner = planet_rad[i] * rf(1.2f, 1.5f);
         float outer = inner + planet_rad[i] * rf(0.4f, 0.9f);
         ring_outer[i] = outer;
-        Material rm{Vec3(rf(0.6f, 0.8f), rf(0.55f, 0.7f), rf(0.45f, 0.6f)), false};
+        Vec3 ring_base(rf(0.6f, 0.8f), rf(0.55f, 0.7f), rf(0.45f, 0.6f));
+        Material rm{ring_base, false};
         rm.two_sided = true;  // lit from either face, reads as translucent
+        // Concentric color bands: ring_colors distinct brightness/tint steps across the
+        // radius, so the ring reads as banded (Saturn-like) rather than a flat sheet.
+        int nbands = std::max(1, static_cast<int>(p.ring_colors * rf(0.7f, 1.3f) + 0.5f));
+        for (int s = 0; s < nbands && nbands > 1; ++s) {
+            float pos = static_cast<float>(s) / (nbands - 1);
+            Vec3 col = ring_base * rf(0.55f, 1.1f);  // per-band brightness
+            rm.ring_ramp.push_back({pos,
+                Vec3(std::min(1.0f, col.x), std::min(1.0f, col.y), std::min(1.0f, col.z)), 1.0f});
+        }
         Vec3 axis = bodies[planet_idx[i]].spin.axis;  // ring sits in the equatorial plane
         auto disk = std::make_shared<Disk>(Vec3(0, 0, 0), axis, inner, outer, rm);
         disk->name = bodies[planet_idx[i]].shape->name + " Ring";
@@ -581,6 +712,12 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
                 mm.terrain.enabled = true;
                 mm.terrain.sea_level = 0.0f;  // airless: no ocean, just the mottle + caps
                 mm.terrain.cap = rf(0.78f, 0.92f);
+            }
+            if (u01(rng) < p.crater_chance) {  // moons are airless -> cratered
+                mm.craters.enabled = true;
+                mm.craters.density = rf(4.0f, 8.0f);
+                mm.craters.strength = rf(0.4f, 0.75f);
+                mm.craters.seed = ri(1, 9999);
             }
             auto ms = std::make_shared<Sphere>(Vec3(0, 0, 0), mrad, mm);
             ms->name = bodies[planet_idx[i]].shape->name + " Moon " + std::to_string(k + 1);
@@ -669,6 +806,24 @@ void generate_eclipse_system(Scene& scene, const SystemGenParams& p,
     int fg = scene.cam.orbit.parent;  // the planet generate_system chose to orbit
     if (fg < 1 || fg >= static_cast<int>(scene.bodies.size())) return;
 
+    // Hide every OTHER sun-orbiting planet at the cut: force it coplanar (normal +Y)
+    // and start it at phase 0 so at t = 0 it sits on the +Z axis behind the foreground
+    // planet (and the sun), out of view. Re-time to an integer number of orbits per
+    // cycle so it returns to exactly that hidden spot at the next cut (t = T), then
+    // shrink it so it never reads as large as the sun when it swings into view
+    // mid-cycle. Mid-cycle it is only briefly visible off to the side (issue #5 / #6 /
+    // #8 together: hidden at the cut, a small glimpse the rest of the time).
+    for (int idx : planets) {
+        if (idx == fg) continue;
+        Orbit& o = scene.bodies[idx].orbit;
+        o.normal = Vec3(0, 1, 0);
+        o.phase = 0.0f;
+        int k = 1 + static_cast<int>(2.0f * eu(erng));  // 1..2 orbits per cycle (gentle)
+        o.period = T / k;
+        if (auto s = std::dynamic_pointer_cast<Sphere>(scene.bodies[idx].shape))
+            s->radius *= 0.7f;  // clearly secondary to the hero / sun
+    }
+
     float r_fg = 1.0f;
     if (auto s = std::dynamic_pointer_cast<Sphere>(scene.bodies[fg].shape))
         r_fg = s->radius;
@@ -714,12 +869,13 @@ void generate_eclipse_system(Scene& scene, const SystemGenParams& p,
     c.target = fg;
 }
 
-std::string scene_to_json(const Scene& scene) {
+namespace {
+json scene_to_json_obj(const Scene& scene) {
     json bodies = json::array();
     for (const auto& b : scene.bodies)
         bodies.push_back(body_to_json(b));
 
-    json j{
+    return json{
         {"camera", to_json(scene.cam)},
         {"light_dir", to_json(scene.light_dir)},
         {"fill_light", scene.fill_light},
@@ -729,6 +885,16 @@ std::string scene_to_json(const Scene& scene) {
         {"resolution", {{"width", scene.width}, {"height", scene.height}}},
         {"bodies", bodies},
     };
+}
+}  // namespace
+
+std::string scene_to_json(const Scene& scene) {
+    return scene_to_json_obj(scene).dump(2);
+}
+
+std::string scene_to_json(const Scene& scene, const EditorSettings& settings) {
+    json j = scene_to_json_obj(scene);
+    j["editor"] = to_json(settings);
     return j.dump(2);
 }
 
@@ -829,6 +995,7 @@ World world_at_time(const Scene& scene, float t) {
             // Clouds drift relative to the surface; caps swing with the seasons.
             const Material& mat = s->material;
             s->cloud_angle = s->spin_angle + TWO_PI * t * mat.clouds.drift;
+            s->band_angle = s->spin_angle + TWO_PI * t * mat.band_drift;
             const Terrain& tr = mat.terrain;
             s->season_swing = (tr.enabled && tr.season_period != 0.0f)
                 ? tr.cap_season * std::sin(TWO_PI * t / tr.season_period)
@@ -865,6 +1032,31 @@ bool load_scene(Scene& out, const std::string& path) {
                      std::istreambuf_iterator<char>());
     try {
         out = scene_from_json(text);
+    } catch (const std::exception&) {
+        return false;
+    }
+    return true;
+}
+
+bool save_scene(const Scene& scene, const EditorSettings& settings,
+                const std::string& path) {
+    std::ofstream f(path);
+    if (!f) return false;
+    f << scene_to_json(scene, settings);
+    return static_cast<bool>(f);
+}
+
+bool load_scene(Scene& out, EditorSettings& settings, const std::string& path) {
+    std::ifstream f(path);
+    if (!f) return false;
+    std::string text((std::istreambuf_iterator<char>(f)),
+                     std::istreambuf_iterator<char>());
+    try {
+        json j = json::parse(text);
+        out = scene_from_json(text);
+        // Editor section is optional (old scenes won't have it → keep defaults).
+        settings = j.contains("editor") ? editor_settings_from_json(j.at("editor"))
+                                        : EditorSettings{};
     } catch (const std::exception&) {
         return false;
     }
