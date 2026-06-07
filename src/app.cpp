@@ -3,6 +3,7 @@
 // click-to-select with an orange outline + orbit overlay, an Add menu, a contextual
 // properties panel, and a toggle to look through the render camera.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -17,6 +18,7 @@
 #include <GLFW/glfw3.h>
 
 #include "stb/stb_image_write.h"
+#include "gif.h"
 
 #include "scene.h"
 #include "sphere.h"
@@ -125,6 +127,27 @@ void basis_from_normal(Vec3 n, Vec3& u, Vec3& v) {
 // confirm, RMB/Esc to cancel.
 enum class XMode { None, Grab, Rotate, Scale };
 
+// In-progress animation export. Frames are rendered incrementally (a time-budgeted
+// batch per UI frame) so the window stays responsive and shows progress instead of
+// freezing — a blocking loop made the OS mark the app "not responding".
+struct ExportJob {
+    bool active = false;
+    bool cancel = false;
+    bool loops = false;            // false = duration sweep, true = eclipse cycles
+    GifWriter gif;
+    int frame = 0, total = 0;
+    int delay_cs = 3;
+    float dt = 0.0f;
+    std::string path;
+    std::vector<uint32_t> buf;
+    // State saved on start and restored on finish so the live editor is unchanged.
+    std::string snap;              // loops mode: scene JSON snapshot
+    float s_time = 0.0f, s_cyc = 0.0f;
+    int s_seed = 0, s_sel = 0;
+    bool s_inf = false, s_play = false;
+    std::vector<Vec3> s_from, s_to;
+};
+
 struct Editor {
     Scene scene;
     int selected = -1;
@@ -176,6 +199,21 @@ struct Editor {
     int cam_loops = 2;                   // camera revolutions per scene (1 = calm, parked planet)
     std::vector<Vec3> pal_from, pal_to;  // palette morph endpoints
     int pal_transition = 0;              // 0 = Morph across the cycle, 1 = Snap at eclipse
+
+    // Animation export (GIF). Transient authoring controls; not persisted.
+    bool want_export_anim = false;       // one-shot flag to open the export dialog
+    char anim_name[128] = "anim";        // output base name -> renders/<name>.gif
+    int anim_fps = 30;
+    int anim_mode = 0;                   // 0 = by duration (s), 1 = by eclipse-loop cycles
+    float anim_seconds = 10.0f;          // duration mode: total length
+    int anim_cycles = 1;                 // loops mode: number of full eclipse cycles
+    ExportJob export_job;                // in-progress incremental export (if active)
+
+    // Fullscreen toggle. `want_toggle_fullscreen` is handled in main() (it owns the
+    // GLFWwindow); win_* save the windowed rect so Esc/F can restore it.
+    bool fullscreen = false;
+    bool want_toggle_fullscreen = false;
+    int win_x = 0, win_y = 0, win_w = 1400, win_h = 820;
 
     // Active modal transform + the snapshot taken when it began (for cancel).
     XMode xmode = XMode::None;
@@ -854,6 +892,136 @@ void drive_palette(Editor& ed) {
         pal[i] = ed.pal_from[i] * (1.0f - u) + ed.pal_to[i] * u;
 }
 
+// Animation export to renders/<name>.gif, run incrementally so the UI stays
+// responsive (step_export renders a time-budgeted batch per frame; the main loop
+// keeps pumping events and drawing a progress bar). Two modes:
+//   Duration: sweep `time` over `anim_seconds` of the current scene (orbits/spin
+//             animate; the system is not regenerated). The scene is left untouched.
+//   Cycles:   render `anim_cycles` full eclipse loops, regenerating the system and
+//             morphing the palette at each eclipse exactly like live Infinite mode.
+// The editor is snapshotted on start and fully restored on finish/cancel.
+void start_export(Editor& ed) {
+    ExportJob& j = ed.export_job;
+    int fps = std::max(1, ed.anim_fps);
+    j.dt = 1.0f / static_cast<float>(fps);
+    j.delay_cs = std::max(1, (100 + fps / 2) / fps);  // centiseconds per frame
+    j.path = std::string(RENDERS_DIR) + "/" + ed.anim_name + ".gif";
+    j.loops = (ed.anim_mode != 0);
+    j.frame = 0;
+    j.cancel = false;
+
+    if (!GifBegin(&j.gif, j.path.c_str(), ed.scene.width, ed.scene.height, j.delay_cs))
+        return;  // couldn't open the file; stays inactive
+
+    // Snapshot everything either mode might touch, so finish_export can restore it.
+    j.snap = scene_to_json(ed.scene);
+    j.s_time = ed.time;
+    j.s_seed = ed.gen.seed;
+    j.s_inf = ed.infinite_mode;
+    j.s_play = ed.playing;
+    j.s_sel = ed.selected;
+    j.s_from = ed.pal_from;
+    j.s_to = ed.pal_to;
+    j.s_cyc = ed.cycle_len;
+
+    if (j.loops) {
+        start_infinite(ed);  // fresh deterministic cycle from t = 0
+        j.total = std::max(1, static_cast<int>(ed.anim_cycles * ed.scene_seconds * fps + 0.5f));
+    } else {
+        j.total = std::max(1, static_cast<int>(ed.anim_seconds * fps + 0.5f));
+    }
+    j.active = true;
+}
+
+void finish_export(Editor& ed) {
+    ExportJob& j = ed.export_job;
+    GifEnd(&j.gif);
+
+    // Restore the live editor exactly as it was before the export began.
+    ed.scene = scene_from_json(j.snap);
+    ed.time = j.s_time;
+    ed.gen.seed = j.s_seed;
+    ed.infinite_mode = j.s_inf;
+    ed.playing = j.s_play;
+    ed.selected = j.s_sel;
+    ed.pal_from = std::move(j.s_from);
+    ed.pal_to = std::move(j.s_to);
+    ed.cycle_len = j.s_cyc;
+
+    bool canceled = j.cancel;
+    std::string path = j.path;
+    j.active = false;
+    j.snap.clear();
+    j.buf.clear();
+    j.buf.shrink_to_fit();
+    force_redraw(ed);
+
+    if (canceled) {
+        std::error_code ec;
+        fs::remove(path, ec);  // discard the partial gif
+    } else {
+        ed.dialog_verb = "Exported";
+        ed.dialog_path = fs::absolute(path).string();
+        ed.want_saved = true;
+    }
+}
+
+// Render frames toward the export until a wall-clock budget elapses (keeps the UI
+// responsive), then yield. Uploads the latest frame to ed.tex for a live preview.
+void step_export(Editor& ed) {
+    ExportJob& j = ed.export_job;
+    using clock = std::chrono::steady_clock;
+    auto t0 = clock::now();
+    const auto budget = std::chrono::milliseconds(80);
+
+    while (j.frame < j.total && !j.cancel) {
+        if (!j.loops) ed.time = j.frame * j.dt;
+        render_scene(ed.scene, ed.time, j.buf);
+        GifWriteFrame(&j.gif, reinterpret_cast<const uint8_t*>(j.buf.data()),
+                      ed.scene.width, ed.scene.height, j.delay_cs);
+        if (j.loops) {  // advance, mirroring the live main loop (render-then-step)
+            ed.time += j.dt;
+            if (ed.cycle_len > 0.0f && ed.time >= ed.cycle_len) {
+                ed.time -= ed.cycle_len;
+                eclipse_next_cycle(ed);
+            }
+            drive_palette(ed);
+        }
+        ++j.frame;
+        if (clock::now() - t0 > budget) break;
+    }
+
+    ed.pixels = j.buf;  // show the most recent frame as a live preview
+    upload_texture(ed, ed.scene.width, ed.scene.height);
+
+    if (j.frame >= j.total || j.cancel) finish_export(ed);
+}
+
+// Progress window shown while an export runs (the rest of the editor is suspended).
+void draw_export_progress(Editor& ed) {
+    ExportJob& j = ed.export_job;
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::Begin("Exporting animation", nullptr,
+                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize);
+    ImGui::Text("Rendering %s", j.path.c_str());
+    float frac = j.total > 0 ? static_cast<float>(j.frame) / j.total : 0.0f;
+    ImGui::ProgressBar(frac, ImVec2(360, 0));
+    ImGui::Text("Frame %d / %d", j.frame, j.total);
+
+    float a = ed.scene.aspect_ratio();
+    float pw = 360.0f, ph = std::max(1.0f, pw / a);
+    if (ed.tex)
+        ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(ed.tex)),
+                     ImVec2(pw, ph));
+
+    if (ImGui::Button("Cancel", ImVec2(120, 0)) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape))
+        j.cancel = true;
+    ImGui::End();
+}
+
 // Generate tab: knobs for the procedural star-system generator.
 void draw_generate_tab(Editor& ed) {
     SystemGenParams& g = ed.gen;
@@ -977,7 +1145,32 @@ void draw_timeline(Editor& ed) {
     ImGui::SetNextItemWidth(140.0f);
     ImGui::DragFloat("Speed", &ed.play_speed, 0.05f, 0.0f, 100.0f);
     ImGui::SameLine();
-    ImGui::Text("Output: %dx%d", ed.scene.width, ed.scene.height);
+    ImGui::TextUnformatted("Output");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(70.0f);
+    if (ImGui::InputInt("##outw", &ed.scene.width, 0, 0)) {
+        ed.scene.width = std::max(16, ed.scene.width);
+        force_redraw(ed);
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted("x");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(70.0f);
+    if (ImGui::InputInt("##outh", &ed.scene.height, 0, 0)) {
+        ed.scene.height = std::max(16, ed.scene.height);
+        force_redraw(ed);
+    }
+    struct Preset { const char* label; int w, h; };
+    for (Preset pr : {Preset{"400x200", 400, 200}, Preset{"800x400", 800, 400},
+                      Preset{"1280x720", 1280, 720}}) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton(pr.label)) {
+            ed.scene.width = pr.w;
+            ed.scene.height = pr.h;
+            force_redraw(ed);
+        }
+    }
+
     ImGui::SameLine();
     if (ImGui::Button("Export PNG")) {
         std::vector<uint32_t> full;  // full-res render from the render camera
@@ -990,6 +1183,9 @@ void draw_timeline(Editor& ed) {
         ed.dialog_path = fs::absolute(path).string();
         ed.want_saved = true;
     }
+    ImGui::SameLine();
+    if (ImGui::Button("Export GIF...")) ed.want_export_anim = true;
+    ImGui::SetItemTooltip("Render an animated GIF (shows progress; cancelable).");
 
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::DragFloat("##time", &ed.time, 0.05f, 0.0f, 0.0f, "Time: %.2f s");
@@ -1139,6 +1335,7 @@ void do_load(Editor& ed, const std::string& name) {
 void draw_dialogs(Editor& ed) {
     if (ed.want_save_as) { ImGui::OpenPopup("Save scene as"); ed.want_save_as = false; }
     if (ed.want_load)    { ImGui::OpenPopup("Load scene");    ed.want_load = false; }
+    if (ed.want_export_anim) { ImGui::OpenPopup("Export animation"); ed.want_export_anim = false; }
     if (ed.want_saved)   { ImGui::OpenPopup("File written");  ed.want_saved = false; }
 
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
@@ -1167,6 +1364,43 @@ void draw_dialogs(Editor& ed) {
         for (const std::string& n : names)
             if (ImGui::Selectable(n.c_str())) { do_load(ed, n); ImGui::CloseCurrentPopup(); }
         ImGui::Separator();
+        if (ImGui::Button("Cancel", ImVec2(110, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Export animation", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::SetNextItemWidth(240);
+        ImGui::InputText("Name", ed.anim_name, sizeof(ed.anim_name));
+        ImGui::TextDisabled("Output: %s/%s.gif", RENDERS_DIR, ed.anim_name);
+        ImGui::SetNextItemWidth(120);
+        ImGui::InputInt("FPS", &ed.anim_fps);
+        ed.anim_fps = std::clamp(ed.anim_fps, 1, 60);
+
+        ImGui::SetNextItemWidth(160);
+        const char* modes[] = {"By duration", "By loop cycles"};
+        ImGui::Combo("Length mode", &ed.anim_mode, modes, 2);
+        if (ed.anim_mode == 0) {
+            ImGui::SetNextItemWidth(120);
+            ImGui::DragFloat("Seconds", &ed.anim_seconds, 0.1f, 0.1f, 600.0f, "%.1f s");
+        } else {
+            ImGui::SetNextItemWidth(120);
+            ImGui::SliderInt("Cycles", &ed.anim_cycles, 1, 10);
+            ImGui::TextDisabled("Renders %d eclipse loop(s) of %.0f s (regenerates each).",
+                                ed.anim_cycles, ed.scene_seconds);
+        }
+        long frames = (ed.anim_mode == 0)
+                          ? std::lround(ed.anim_seconds * ed.anim_fps)
+                          : std::lround(ed.anim_cycles * ed.scene_seconds * ed.anim_fps);
+        ImGui::Text("%ld frames at %dx%d (progress shown; cancelable).", frames,
+                    ed.scene.width, ed.scene.height);
+        ImGui::Separator();
+        bool go = ImGui::Button("Export", ImVec2(110, 0));
+        if (go && ed.anim_name[0] != '\0') {
+            start_export(ed);  // runs incrementally; progress window takes over
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(110, 0))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
@@ -1528,6 +1762,64 @@ void draw_viewport(Editor& ed) {
     ImGui::End();
 }
 
+// Fullscreen presentation: just the raytraced scene, centered and letterboxed with
+// black bars when the output aspect ratio doesn't match the screen. No panels, no
+// overlays. F/Esc (handled in layout_and_draw) exit; Space/N/0 still work.
+void draw_fullscreen(Editor& ed) {
+    ImGuiIO& io = ImGui::GetIO();
+    const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    float a = ed.scene.aspect_ratio();
+
+    // Fit the output aspect into the screen; the leftover becomes black letterbox.
+    float dispW, dispH;
+    if (W / H > a) { dispH = H; dispW = H * a; }
+    else { dispW = W; dispH = W / a; }
+    float x0 = (W - dispW) * 0.5f, y0 = (H - dispH) * 0.5f;
+
+    // Coarse render at the output aspect (the texture is scaled up to the fit rect).
+    int rw = std::clamp(static_cast<int>(dispW / 3), 80, 640);
+    int rh = std::max(1, static_cast<int>(rw / a));
+    Camera cam = active_camera(ed, a);
+
+    bool resized = (rw != ed.last_rw || rh != ed.last_rh);
+    if (ed.playing || resized) ed.redraw_frames = 3;
+    if (ed.redraw_frames > 0) {
+        render_view(ed.scene, cam, ed.time, rw, rh, ed.pixels, ed.shade_mode);
+        upload_texture(ed, rw, rh);
+        ed.last_rw = rw;
+        ed.last_rh = rh;
+        --ed.redraw_frames;
+    }
+
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 255));
+    ImGui::Begin("##fullscreen", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoScrollbar);
+    ImGui::GetWindowDrawList()->AddImage(
+        static_cast<ImTextureID>(static_cast<intptr_t>(ed.tex)), ImVec2(x0, y0),
+        ImVec2(x0 + dispW, y0 + dispH));
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+
+    // Minimal playback keys (the rest of the editor is hidden).
+    if (!io.WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Space)) ed.playing = !ed.playing;
+        if (ImGui::IsKeyPressed(ImGuiKey_N) && ed.infinite_mode) {
+            ed.time = 0.0f;
+            eclipse_next_cycle(ed);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_0) || ImGui::IsKeyPressed(ImGuiKey_Keypad0)) {
+            ed.look_through_camera = !ed.look_through_camera;
+            force_redraw(ed);
+        }
+    }
+}
+
 void layout_and_draw(Editor& ed) {
     ImGuiIO& io = ImGui::GetIO();
     const float menu_h = ImGui::GetFrameHeight();
@@ -1535,6 +1827,14 @@ void layout_and_draw(Editor& ed) {
     const float bottom_h = 100.0f;
     const float W = io.DisplaySize.x;
     const float H = io.DisplaySize.y;
+
+    // An export in progress owns the scene/time state and suspends the editor:
+    // render a batch of frames and show only the progress window this frame.
+    if (ed.export_job.active) {
+        step_export(ed);
+        draw_export_progress(ed);
+        return;
+    }
 
     // Advance animation time while playing (orbits/spin pose from `time`).
     if (ed.playing) ed.time += io.DeltaTime * ed.play_speed;
@@ -1562,6 +1862,25 @@ void layout_and_draw(Editor& ed) {
         bool z = ImGui::IsKeyPressed(ImGuiKey_Z, false);
         if (z && !io.KeyShift) undo(ed);
         else if ((z && io.KeyShift) || ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo(ed);
+    }
+
+    // Fullscreen: F toggles; Esc exits (handled in main(), which owns the window).
+    // Esc only exits when no modal transform is mid-flight (it cancels those) and no
+    // popup is open (it closes those), so it never steals their Esc.
+    if (!io.WantTextInput) {
+        bool any_popup = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId |
+                                                         ImGuiPopupFlags_AnyPopupLevel);
+        if (ImGui::IsKeyPressed(ImGuiKey_F, false))
+            ed.want_toggle_fullscreen = true;
+        else if (ed.fullscreen && ed.xmode == XMode::None && !any_popup &&
+                 ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            ed.want_toggle_fullscreen = true;
+    }
+
+    // Fullscreen: show only the scene (no menu/panels/overlays), letterboxed.
+    if (ed.fullscreen) {
+        draw_fullscreen(ed);
+        return;
     }
 
     draw_menu_bar(ed);
@@ -1637,6 +1956,27 @@ int main() {
         ImGui::NewFrame();
 
         layout_and_draw(ed);
+
+        // Fullscreen toggle (F/Esc set the flag in layout_and_draw; this owns the
+        // window). Save the windowed rect on the way in so it can be restored.
+        if (ed.want_toggle_fullscreen) {
+            ed.want_toggle_fullscreen = false;
+            if (!ed.fullscreen) {
+                glfwGetWindowPos(window, &ed.win_x, &ed.win_y);
+                glfwGetWindowSize(window, &ed.win_w, &ed.win_h);
+                GLFWmonitor* mon = glfwGetPrimaryMonitor();
+                const GLFWvidmode* mode = glfwGetVideoMode(mon);
+                glfwSetWindowMonitor(window, mon, 0, 0, mode->width, mode->height,
+                                     mode->refreshRate);
+                ed.fullscreen = true;
+            } else {
+                glfwSetWindowMonitor(window, nullptr, ed.win_x, ed.win_y, ed.win_w,
+                                     ed.win_h, 0);
+                ed.fullscreen = false;
+            }
+            glfwSwapInterval(1);  // re-assert vsync after the monitor switch
+            force_redraw(ed);
+        }
 
         ImGui::Render();
         int w, h;
