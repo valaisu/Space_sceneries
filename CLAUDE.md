@@ -21,8 +21,10 @@ cmake --build build -j     # after editing code
 ./build/space_sceneries_tests    # headless sanity checks
 ```
 
-`scene.json` and `render.png` are written to the working directory (both
-gitignored). The editor needs a display; the tests do not.
+The editor keeps files in project subfolders (created on startup): saved scenes in
+`scenes/*.json`, saved palettes in `palettes/*.json`, exported PNGs in `renders/*.png`.
+Only `scenes/default.json` (the base scene loaded on launch) is tracked; the rest is
+gitignored. The editor needs a display; the tests do not.
 
 The build defaults to **`Release` (`-O3`)** when no `CMAKE_BUILD_TYPE` is set — this
 is a CPU raytracer and `-O0` is ~10× slower. CMake also `find_package`s **OpenMP** and
@@ -79,9 +81,14 @@ about `vup`). `scene_camera(scene, t, aspect)` poses it at time `t` (resolving o
 + look mode) into a built `Camera`; `camera_eye(scene, t)` gives just the eye. It is
 drawn as a frustum gizmo in the editor but **never raytraced**.
 
-**Motion (time-based posing).** Orbits are circular: a body orbits a parent body
-(or the world origin) in the plane defined by `Orbit::normal`, with radius / period
-/ phase. `body_world_pos(scene, i, t)` resolves a body's world position through its
+**Motion (time-based posing).** Orbits are **Kepler ellipses**: a body orbits a parent
+body (or the world origin) in the plane defined by `Orbit::normal`, with semi-major axis
+(`radius`) / period / phase (mean-anomaly offset) / `eccentricity`. The parent sits at a
+focus; `orbit_offset` advances the mean anomaly uniformly and Newton-solves the eccentric
+anomaly, so the body moves faster at periapsis (equal-area). `eccentricity == 0` collapses
+to the old uniform circle, so existing scenes are unchanged. `orbit_offset_at(o, E)` maps an
+eccentric anomaly to an in-plane offset and is reused to draw the elliptical orbit path.
+`body_world_pos(scene, i, t)` resolves a body's world position through its
 parent chain at time `t`; `world_at_time(scene, t)` returns a posed snapshot
 (clones each shape with its computed `center`) which is what the raytracer renders.
 `world_at_time` also bakes each sphere's spin orientation (`spin_axis`/`spin_angle`,
@@ -117,13 +124,18 @@ translucent instead of going black. Editor-only
 `InBetween` (one directional auto-aimed from the main sun, no shadows), `Lit`
 (matches export). `render_scene` always uses `Lit`.
 
-**Background (Stage 2).** Misses return a seeded **starfield**: `background()` hashes
-a 3D grid sampled by ray direction (no pole pinch), one star per cell with size /
+**Background (Stage 2).** Misses return a seeded **starfield**: `background(r, bg, time)`
+hashes a 3D grid sampled by ray direction (no pole pinch), one star per cell with size /
 brightness / tint-variation / density / seed from `Scene::background`. Stars are
 sampled over the **3×3×3 neighborhood** with full-cell jitter (round points, no
 visible grid rows), and a low-frequency `fbm` field carves **density regions**
 (`region_scale` / `region_strength`, plus an additive `region_glow` haze) so the sky
-has darker and denser areas.
+has darker and denser areas; `region_star_boost` makes those regions also hold **more,
+brighter stars** (the "nebula" look). A **galactic band** (`band_*`) is a non-noise
+pattern — the great-circle equator of `band_normal` — that concentrates stars + a tinted
+haze along a Milky-Way-like band. **Shooting stars** (`shoot_*`) are time-driven: a few
+deterministic streaks sweep great-circle arcs with fading tails, so they only move while
+the timeline plays (this is why `background`/`ray_color` take a `time` arg; previews pass 0).
 
 **Atmosphere (Stage 6).** A sphere `Material` may carry an `Atmosphere` (day `color`,
 `sunset` tint, `thickness`, `intensity`). `atmosphere_glow` adds a Fresnel-like limb
@@ -170,12 +182,17 @@ left-click/Enter to confirm, right-click/Esc to cancel. The Timeline has Play/Pa
 delta so orbits and spin animate. View ▸ "Look through camera" (also **`0`**) renders
 from the scene's render camera; View ▸ "Display mode" picks the viewport `ShadeMode`
 (Direction / In-between / Lit); Export PNG renders the render camera at full
-resolution (always Lit). The **File** menu has a filename text field driving **Save**
-/ **Load** (any named `*.json` in the working dir) plus **Set as default** (writes
-`default.json`); on startup the editor loads `default.json` if present, else the
-built-in `make_default_scene()`. The **World** tab holds scene-global lighting + the
-background starfield (with a live sky preview); **Stylize** holds the palette
-post-process (incl. the `base_hue` slider); **Object** shows the selected body — a
+resolution to `renders/` (always Lit). The **File** menu drives modal **Save As…** /
+**Load…** dialogs over `scenes/*.json` (also `Ctrl+S` / `Ctrl+Shift+S`) and **Set as
+default** (writes `scenes/default.json`); every save/export raises a confirmation popup
+showing the absolute path with a strip of the current palette. On startup the editor loads
+`scenes/default.json` if present, else the built-in `make_default_scene()`. The **Edit**
+menu has **Undo** / **Redo** (`Ctrl+Z` / `Ctrl+Shift+Z`): a snapshot history committed once
+an edit settles (mouse up, no active widget), so a continuous drag is one entry; loads reset
+it. The **World** tab holds scene-global lighting + the background starfield — incl. the
+nebula **Stars-in-nebula** boost, the **galactic band**, and **shooting stars** (with a live
+sky preview); **Stylize** holds the palette post-process (incl. the `base_hue` slider and a
+**palette library** that saves/loads `palettes/*.json`); **Object** shows the selected body — a
 sphere's material/texture, **clouds** layer, and atmosphere (with a neutral-light
 material preview), or a ring's color ramp. Color-ramp rows expose a per-stop **alpha**
 slider. The `render_material_preview` / `render_background_preview` thumbnails live in
@@ -223,3 +240,11 @@ slider. The `render_material_preview` / `render_background_preview` thumbnails l
 - **Editor preference: when a UI detail is unspecified, do it the Blender way** —
   *except* the edit-camera navigation, which the user deliberately customized
   (left-drag move, right-drag orbit, `+`/`-`/`X`/`Y`/`Z`/`C`, no pan).
+- **Files live in subfolders, not the working dir:** `scenes/`, `palettes/`, `renders/`
+  (created on startup in `main`). `scene_path`/`palette_path`/`list_json` (app.cpp) build
+  paths and list entries; palette I/O (`save_palette`/`load_palette`) lives in `scene.cpp`
+  with the other JSON so `core/post` stays JSON-free. Menu actions that change the scene
+  (load/add/delete/undo) must call `force_redraw` — the viewport is gated and won't refresh
+  on its own (this is what made "Load" look broken).
+- **Magnitude fields use `drag_scale`** (app.cpp): a logarithmic `DragFloat` (fine control
+  below 1.0) with Ctrl+click to type an exact value — used for radii and noise/cloud scales.

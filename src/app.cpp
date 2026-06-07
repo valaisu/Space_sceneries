@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,6 +29,56 @@ constexpr float PI = 3.14159265358979323846f;
 // Selection sentinels: -1 nothing, -2 the camera object; >= 0 indexes a body.
 constexpr int SEL_NONE = -1;
 constexpr int SEL_CAMERA = -2;
+
+namespace fs = std::filesystem;
+
+// Project subfolders for orderly, predictable file locations.
+constexpr const char* SCENES_DIR = "scenes";
+constexpr const char* PALETTES_DIR = "palettes";
+constexpr const char* RENDERS_DIR = "renders";
+
+// "scenes/<name>.json" (the extension is added once, even if `name` carries it).
+std::string scene_path(const std::string& name) {
+    std::string n = name;
+    const std::string ext = ".json";
+    if (n.size() < ext.size() || n.compare(n.size() - ext.size(), ext.size(), ext) != 0)
+        n += ext;
+    return std::string(SCENES_DIR) + "/" + n;
+}
+
+// "palettes/<name>.json" (extension added once).
+std::string palette_path(const std::string& name) {
+    std::string n = name;
+    const std::string ext = ".json";
+    if (n.size() < ext.size() || n.compare(n.size() - ext.size(), ext.size(), ext) != 0)
+        n += ext;
+    return std::string(PALETTES_DIR) + "/" + n;
+}
+
+// Names (without extension) of every *.json file in `dir`, sorted. Empty if none.
+std::vector<std::string> list_json(const std::string& dir) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        if (!e.is_regular_file()) continue;
+        if (e.path().extension() == ".json") out.push_back(e.path().stem().string());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+// A thin strip of a palette's swatches — used in the save/export confirmation
+// popup and the Stylize palette library.
+void draw_palette_strip(const std::vector<Vec3>& palette) {
+    for (int k = 0; k < static_cast<int>(palette.size()); ++k) {
+        ImGui::PushID(k);
+        ImGui::ColorButton("##sw", ImVec4(palette[k].x, palette[k].y, palette[k].z, 1.0f),
+                           ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder,
+                           ImVec2(14, 14));
+        ImGui::PopID();
+        if (k + 1 < static_cast<int>(palette.size())) ImGui::SameLine(0.0f, 0.0f);
+    }
+}
 
 // ---- Editor (orbit) camera -------------------------------------------------
 // Orbits a target point. Default looks straight down (top view).
@@ -85,7 +136,19 @@ struct Editor {
     bool show_orbits = true;  // orbit-path overlays in the edit view (hidden through camera)
     ShadeMode shade_mode = ShadeMode::Lit;  // viewport display mode (export is always Lit)
 
-    char scene_file[128] = "scene.json";  // Save/Load target (editable in the File menu)
+    char scene_file[128] = "";   // current scene name (no extension); "" = unnamed
+    char name_buf[128] = "";     // text field in the Save As dialog
+    char palette_name[128] = ""; // text field in the Stylize palette library
+
+    // File-dialog state. `want_*` are one-shot flags that open the matching popup.
+    bool want_save_as = false, want_load = false, want_saved = false;
+    std::string dialog_verb = "Saved";  // "Saved" or "Exported", shown in the popup
+    std::string dialog_path;            // absolute path shown in the confirmation popup
+
+    // Undo/redo: scene snapshots (JSON). `last_committed` is the current baseline;
+    // a new snapshot is pushed once an edit settles (mouse up, no active widget).
+    std::vector<std::string> undo_stack, redo_stack;
+    std::string last_committed;
 
     GLuint tex = 0;
     std::vector<uint32_t> pixels;
@@ -284,13 +347,15 @@ void draw_camera_orbit(ImDrawList* dl, const ScreenMap& map, const Scene& scene,
         base = body_world_pos(scene, o.parent, t);
     Vec3 bu, bv;
     basis_from_normal(o.normal, bu, bv);
+    float e = std::clamp(o.eccentricity, 0.0f, 0.99f);
     constexpr int N = 64;
     ImVec2 pts[N];
     int n = 0;
     bool any_behind = false;
     for (int k = 0; k < N; ++k) {
-        float ang = (2.0f * PI * k) / N;
-        Vec3 wp = base + (bu * std::cos(ang) + bv * std::sin(ang)) * o.radius;
+        float ang = (2.0f * PI * k) / N;  // eccentric anomaly param (focus at parent)
+        Vec3 wp = base + bu * (o.radius * (std::cos(ang) - e))
+                       + bv * (o.radius * std::sqrt(1.0f - e * e) * std::sin(ang));
         if (map.to_screen(wp, pts[n])) ++n; else any_behind = true;
     }
     if (n >= 2)
@@ -328,6 +393,17 @@ void draw_axis_gizmo(ImDrawList* dl, const Camera& cam, ImVec2 corner) {
 
 // ---- Properties panel (contextual) ----------------------------------------
 
+// A magnitude field with dynamic precision: logarithmic drag so the step shrinks
+// near 0 (fine control below 1.0), plus Ctrl+click to type an exact value — the
+// native ImGui edit field with a text cursor is the "write a number" indicator.
+bool drag_scale(const char* label, float* v, float vmin, float vmax) {
+    bool changed = ImGui::DragFloat(label, v, 0.01f, vmin, vmax, "%.3f",
+                                    ImGuiSliderFlags_Logarithmic);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Drag to adjust  -  Ctrl+click to type a value");
+    return changed;
+}
+
 // Shared Orbit editor used by both bodies and the camera. `exclude` is a body
 // index to omit from the parent picker (a body can't orbit itself); -1 excludes none.
 void orbit_controls(Orbit& orbit, const std::vector<Body>& bodies, int exclude) {
@@ -354,9 +430,10 @@ void orbit_controls(Orbit& orbit, const std::vector<Body>& bodies, int exclude) 
         if (ImGui::SmallButton("Make it orbit")) orbit.radius = 5.0f;
         return;
     }
-    ImGui::DragFloat("Orbit Radius", &orbit.radius, 0.1f, 0.0f, 1000.0f);
+    drag_scale("Orbit Radius", &orbit.radius, 0.0f, 1000.0f);
     ImGui::DragFloat("Period (s)", &orbit.period, 0.1f, 0.01f, 100000.0f);
     ImGui::SliderAngle("Phase", &orbit.phase);
+    ImGui::SliderFloat("Eccentricity", &orbit.eccentricity, 0.0f, 0.9f);
     ImGui::DragFloat3("Plane Normal", &orbit.normal.x, 0.05f);
 }
 
@@ -439,7 +516,7 @@ void draw_object_tab(Editor& ed) {
     if (auto s = std::dynamic_pointer_cast<Sphere>(obj)) {
         ImGui::TextUnformatted("Sphere");
         if (!orbiting) ImGui::DragFloat3("Position", &s->center.x, 0.1f);
-        ImGui::SliderFloat("Radius", &s->radius, 0.05f, 20.0f);
+        drag_scale("Radius", &s->radius, 0.01f, 100.0f);
         ImGui::SeparatorText("Material");
         Material& m = s->material;
         ImGui::ColorEdit3("Albedo", &m.albedo.x);
@@ -447,7 +524,7 @@ void draw_object_tab(Editor& ed) {
         bool textured = m.pattern != 0;
         if (ImGui::Checkbox("Textured", &textured)) m.pattern = textured ? 1 : 0;
         if (m.pattern != 0) {
-            ImGui::SliderFloat("Noise scale", &m.noise_scale, 0.5f, 16.0f);
+            drag_scale("Noise scale", &m.noise_scale, 0.1f, 32.0f);
             ImGui::SliderInt("Octaves", &m.noise_octaves, 1, 8);
             ImGui::SliderFloat("Band strength", &m.band_strength, 0.0f, 1.0f);
             ImGui::SliderFloat("Band freq", &m.band_freq, 1.0f, 30.0f);
@@ -460,7 +537,7 @@ void draw_object_tab(Editor& ed) {
         Clouds& cl = m.clouds;
         ImGui::Checkbox("Has clouds", &cl.enabled);
         if (cl.enabled) {
-            ImGui::SliderFloat("Cloud scale", &cl.scale, 0.5f, 16.0f);
+            drag_scale("Cloud scale", &cl.scale, 0.1f, 32.0f);
             ImGui::SliderInt("Cloud octaves", &cl.octaves, 1, 8);
             ImGui::SliderFloat("Coverage", &cl.coverage, 0.0f, 1.0f);
             ImGui::SliderFloat("Cloud opacity", &cl.opacity, 0.0f, 1.0f);
@@ -485,8 +562,8 @@ void draw_object_tab(Editor& ed) {
         ImGui::TextUnformatted("Ring");
         if (!orbiting) ImGui::DragFloat3("Position", &d->center.x, 0.1f);
         ImGui::DragFloat3("Normal", &d->normal.x, 0.05f);
-        ImGui::SliderFloat("Inner Radius", &d->inner_radius, 0.0f, 20.0f);
-        ImGui::SliderFloat("Outer Radius", &d->outer_radius, 0.0f, 20.0f);
+        drag_scale("Inner Radius", &d->inner_radius, 0.0f, 100.0f);
+        drag_scale("Outer Radius", &d->outer_radius, 0.01f, 100.0f);
         ImGui::SeparatorText("Material");
         ImGui::ColorEdit3("Albedo", &d->material.albedo.x);
         ImGui::Checkbox("Emissive", &d->material.emissive);
@@ -521,10 +598,33 @@ void draw_world_tab(Editor& ed) {
     ImGui::SliderFloat("Color variation", &bg.color_variation, 0.0f, 1.0f);
     ImGui::InputInt("Seed", &bg.seed);
 
-    ImGui::SeparatorText("Density regions");
+    ImGui::SeparatorText("Density regions (nebulas)");
     ImGui::SliderFloat("Region scale", &bg.region_scale, 0.2f, 8.0f);
     ImGui::SliderFloat("Region strength", &bg.region_strength, 0.0f, 1.0f);
     ImGui::SliderFloat("Region glow", &bg.region_glow, 0.0f, 0.3f);
+    ImGui::SliderFloat("Stars in nebula", &bg.region_star_boost, 0.0f, 1.0f);
+
+    ImGui::SeparatorText("Galactic band (Milky Way)");
+    ImGui::Checkbox("Band enabled", &bg.band_enabled);
+    if (bg.band_enabled) {
+        ImGui::DragFloat3("Band normal", &bg.band_normal.x, 0.05f);
+        ImGui::SliderFloat("Band width", &bg.band_width, 0.02f, 0.8f);
+        ImGui::SliderFloat("Band stars", &bg.band_density, 0.0f, 1.0f);
+        ImGui::SliderFloat("Band glow", &bg.band_glow, 0.0f, 0.3f);
+        ImGui::ColorEdit3("Band tint", &bg.band_tint.x);
+    }
+
+    ImGui::SeparatorText("Shooting stars");
+    ImGui::Checkbox("Shooting stars", &bg.shoot_enabled);
+    if (bg.shoot_enabled) {
+        ImGui::TextDisabled("Animate the timeline to see them move.");
+        ImGui::SliderFloat("Rate (per s)", &bg.shoot_rate, 0.1f, 8.0f);
+        ImGui::SliderFloat("Speed", &bg.shoot_speed, 0.2f, 4.0f);
+        ImGui::SliderFloat("Tail length", &bg.shoot_length, 0.02f, 0.6f);
+        drag_scale("Thickness", &bg.shoot_size, 0.003f, 0.1f);
+        ImGui::SliderFloat("Brightness", &bg.shoot_brightness, 0.2f, 3.0f);
+        ImGui::InputInt("Streak seed", &bg.shoot_seed);
+    }
 
     ImGui::SeparatorText("Preview");
     constexpr int PW = 224, PH = 126;
@@ -571,6 +671,30 @@ void draw_stylize_tab(Editor& ed) {
     if (rm >= 0) pp.palette.erase(pp.palette.begin() + rm);
     if (ImGui::SmallButton("Add swatch")) pp.palette.push_back(Vec3(1, 1, 1));
 
+    // Palette library: save the current palette to palettes/ and reuse saved ones
+    // across scenes/sessions.
+    ImGui::SeparatorText("Library");
+    ImGui::SetNextItemWidth(150.0f);
+    ImGui::InputText("Name", ed.palette_name, sizeof(ed.palette_name));
+    ImGui::SameLine();
+    if (ImGui::Button("Save palette") && ed.palette_name[0] != '\0' && !pp.palette.empty())
+        save_palette(pp.palette, palette_path(ed.palette_name));
+    for (const std::string& n : list_json(PALETTES_DIR)) {
+        ImGui::PushID(n.c_str());
+        std::vector<Vec3> pal;
+        if (load_palette(pal, palette_path(n))) {
+            if (ImGui::SmallButton("Load")) {
+                pp.palette = pal;
+                std::snprintf(ed.palette_name, sizeof(ed.palette_name), "%s", n.c_str());
+            }
+            ImGui::SameLine();
+            draw_palette_strip(pal);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(n.c_str());
+        }
+        ImGui::PopID();
+    }
+
     ImGui::SliderFloat("Blur radius", &pp.blur_radius, 0.0f, 5.0f);
     const char* dither[] = {"None", "Ordered (Bayer)", "Random"};
     int dm = static_cast<int>(pp.dither);
@@ -605,8 +729,13 @@ void draw_timeline(Editor& ed) {
     if (ImGui::Button("Export PNG")) {
         std::vector<uint32_t> full;  // full-res render from the render camera
         render_scene(ed.scene, ed.time, full);
-        stbi_write_png("render.png", ed.scene.width, ed.scene.height, 4,
+        std::string name = ed.scene_file[0] ? ed.scene_file : "render";
+        std::string path = std::string(RENDERS_DIR) + "/" + name + ".png";
+        stbi_write_png(path.c_str(), ed.scene.width, ed.scene.height, 4,
                        full.data(), ed.scene.width * 4);
+        ed.dialog_verb = "Exported";
+        ed.dialog_path = fs::absolute(path).string();
+        ed.want_saved = true;
     }
 
     ImGui::SetNextItemWidth(-1.0f);
@@ -654,16 +783,140 @@ void delete_selected(Editor& ed) {
     ed.selected = SEL_NONE;
 }
 
+// Force the gated viewport to re-raytrace for the next few frames. Menu actions
+// (load/add/delete/undo) change the scene without any viewport hover or drag, so
+// without this the stale texture lingers and the change "doesn't show up".
+void force_redraw(Editor& ed) { ed.redraw_frames = 3; }
+
+// ---- Undo / redo -----------------------------------------------------------
+// Snapshot the scene once an edit has settled. Called at the end of each frame:
+// while a widget is active, the mouse is held, a modal transform runs, or playback
+// is on, we wait — so a continuous drag collapses into a single history entry.
+void commit_history(Editor& ed) {
+    if (ImGui::IsAnyItemActive() || ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
+        ed.xmode != XMode::None || ed.playing)
+        return;
+    std::string cur = scene_to_json(ed.scene);
+    if (cur == ed.last_committed) return;  // nothing changed since the last commit
+    ed.undo_stack.push_back(ed.last_committed);
+    if (ed.undo_stack.size() > 100) ed.undo_stack.erase(ed.undo_stack.begin());
+    ed.redo_stack.clear();
+    ed.last_committed = std::move(cur);
+}
+
+void apply_snapshot(Editor& ed, const std::string& snap) {
+    try {
+        ed.scene = scene_from_json(snap);
+    } catch (const std::exception&) {
+        return;
+    }
+    if (ed.selected >= static_cast<int>(ed.scene.bodies.size())) ed.selected = SEL_NONE;
+    force_redraw(ed);
+}
+
+void undo(Editor& ed) {
+    if (ed.undo_stack.empty()) return;
+    ed.redo_stack.push_back(ed.last_committed);
+    ed.last_committed = ed.undo_stack.back();
+    ed.undo_stack.pop_back();
+    apply_snapshot(ed, ed.last_committed);
+}
+
+void redo(Editor& ed) {
+    if (ed.redo_stack.empty()) return;
+    ed.undo_stack.push_back(ed.last_committed);
+    ed.last_committed = ed.redo_stack.back();
+    ed.redo_stack.pop_back();
+    apply_snapshot(ed, ed.last_committed);
+}
+
+// Write the scene to scenes/<name>.json and raise the confirmation popup.
+void do_save(Editor& ed, const std::string& name) {
+    save_scene(ed.scene, scene_path(name));
+    std::snprintf(ed.scene_file, sizeof(ed.scene_file), "%s", name.c_str());
+    ed.dialog_verb = "Saved";
+    ed.dialog_path = fs::absolute(scene_path(name)).string();
+    ed.want_saved = true;
+}
+
+// Load scenes/<name>.json, replacing the scene. Forces a redraw so it shows.
+void do_load(Editor& ed, const std::string& name) {
+    Scene loaded;
+    if (!load_scene(loaded, scene_path(name))) return;
+    ed.scene = loaded;
+    ed.selected = SEL_NONE;
+    std::snprintf(ed.scene_file, sizeof(ed.scene_file), "%s", name.c_str());
+    // A load starts a fresh undo history rooted at the loaded scene.
+    ed.undo_stack.clear();
+    ed.redo_stack.clear();
+    ed.last_committed = scene_to_json(ed.scene);
+    force_redraw(ed);
+}
+
+// Modal file dialogs (Save As / Load) + the confirmation popup. Called once per
+// frame at the top level so the popups have a stable ID-stack home.
+void draw_dialogs(Editor& ed) {
+    if (ed.want_save_as) { ImGui::OpenPopup("Save scene as"); ed.want_save_as = false; }
+    if (ed.want_load)    { ImGui::OpenPopup("Load scene");    ed.want_load = false; }
+    if (ed.want_saved)   { ImGui::OpenPopup("File written");  ed.want_saved = false; }
+
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Save scene as", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Save to scenes/ as:");
+        ImGui::SetNextItemWidth(240);
+        bool enter = ImGui::InputText("##name", ed.name_buf, sizeof(ed.name_buf),
+                                      ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::TextDisabled("Existing (click to reuse the name):");
+        for (const std::string& n : list_json(SCENES_DIR))
+            if (ImGui::Selectable(n.c_str()))
+                std::snprintf(ed.name_buf, sizeof(ed.name_buf), "%s", n.c_str());
+        ImGui::Separator();
+        bool ok = ImGui::Button("Save", ImVec2(110, 0)) || enter;
+        if (ok && ed.name_buf[0] != '\0') { do_save(ed, ed.name_buf); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(110, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Load scene", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        std::vector<std::string> names = list_json(SCENES_DIR);
+        if (names.empty()) ImGui::TextDisabled("(no scenes saved yet)");
+        for (const std::string& n : names)
+            if (ImGui::Selectable(n.c_str())) { do_load(ed, n); ImGui::CloseCurrentPopup(); }
+        ImGui::Separator();
+        if (ImGui::Button("Cancel", ImVec2(110, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("File written", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("%s to:", ed.dialog_verb.c_str());
+        ImGui::TextUnformatted(ed.dialog_path.c_str());
+        ImGui::Spacing();
+        draw_palette_strip(ed.scene.post.palette);
+        ImGui::Spacing();
+        if (ImGui::Button("OK", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
+
 void draw_menu_bar(Editor& ed) {
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("Add")) {
-            if (ImGui::MenuItem("Sphere")) add_sphere(ed);
-            if (ImGui::MenuItem("Ring")) add_ring(ed);
+            if (ImGui::MenuItem("Sphere")) { add_sphere(ed); force_redraw(ed); }
+            if (ImGui::MenuItem("Ring")) { add_ring(ed); force_redraw(ed); }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Edit")) {
+            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, !ed.undo_stack.empty())) undo(ed);
+            if (ImGui::MenuItem("Redo", "Ctrl+Shift+Z", false, !ed.redo_stack.empty())) redo(ed);
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Object")) {
             const bool has_sel = ed.selected >= 0;
-            if (ImGui::MenuItem("Delete", "Del", false, has_sel)) delete_selected(ed);
+            if (ImGui::MenuItem("Delete", "Del", false, has_sel)) { delete_selected(ed); force_redraw(ed); }
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("View")) {
@@ -685,19 +938,21 @@ void draw_menu_bar(Editor& ed) {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("File")) {
-            ImGui::SetNextItemWidth(160);
-            ImGui::InputText("File", ed.scene_file, sizeof(ed.scene_file));
-            if (ImGui::MenuItem("Save")) save_scene(ed.scene, ed.scene_file);
-            if (ImGui::MenuItem("Load")) {
-                Scene loaded;
-                if (load_scene(loaded, ed.scene_file)) {
-                    ed.scene = loaded;
-                    ed.selected = -1;
-                }
+            ImGui::TextDisabled("Current: %s", ed.scene_file[0] ? ed.scene_file : "(unsaved)");
+            ImGui::Separator();
+            // Save to the current name; if unnamed, fall back to Save As.
+            if (ImGui::MenuItem("Save", "Ctrl+S")) {
+                if (ed.scene_file[0]) do_save(ed, ed.scene_file);
+                else { std::snprintf(ed.name_buf, sizeof(ed.name_buf), "%s", ""); ed.want_save_as = true; }
             }
+            if (ImGui::MenuItem("Save As...", "Ctrl+Shift+S")) {
+                std::snprintf(ed.name_buf, sizeof(ed.name_buf), "%s", ed.scene_file);
+                ed.want_save_as = true;
+            }
+            if (ImGui::MenuItem("Load...")) ed.want_load = true;
             ImGui::Separator();
             // Save the current scene as the startup default (loaded on next launch).
-            if (ImGui::MenuItem("Set as default")) save_scene(ed.scene, "default.json");
+            if (ImGui::MenuItem("Set as default")) save_scene(ed.scene, scene_path("default"));
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
@@ -991,6 +1246,21 @@ void layout_and_draw(Editor& ed) {
     // Advance animation time while playing (orbits/spin pose from `time`).
     if (ed.playing) ed.time += io.DeltaTime * ed.play_speed;
 
+    // Global shortcuts (suppressed while typing in a text field).
+    if (!io.WantTextInput && io.KeyCtrl) {
+        if (ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+            if (io.KeyShift || ed.scene_file[0] == '\0') {
+                std::snprintf(ed.name_buf, sizeof(ed.name_buf), "%s", ed.scene_file);
+                ed.want_save_as = true;
+            } else {
+                do_save(ed, ed.scene_file);
+            }
+        }
+        bool z = ImGui::IsKeyPressed(ImGuiKey_Z, false);
+        if (z && !io.KeyShift) undo(ed);
+        else if ((z && io.KeyShift) || ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo(ed);
+    }
+
     draw_menu_bar(ed);
 
     // Three fixed panels: viewport (left), properties (right), timeline (bottom).
@@ -1005,6 +1275,10 @@ void layout_and_draw(Editor& ed) {
     ImGui::SetNextWindowPos(ImVec2(0, H - bottom_h));
     ImGui::SetNextWindowSize(ImVec2(W - right_w, bottom_h));
     draw_timeline(ed);
+
+    draw_dialogs(ed);
+
+    commit_history(ed);  // snapshot the scene for undo once this frame's edits settle
 }
 
 void glfw_error_callback(int error, const char* description) {
@@ -1035,9 +1309,19 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 130");
 
+    // Orderly, predictable file locations (created if missing).
+    std::error_code ec;
+    fs::create_directories(SCENES_DIR, ec);
+    fs::create_directories(PALETTES_DIR, ec);
+    fs::create_directories(RENDERS_DIR, ec);
+
     Editor ed;
     // Load the user's saved default if present, else the built-in starter scene.
-    if (!load_scene(ed.scene, "default.json")) ed.scene = make_default_scene();
+    if (load_scene(ed.scene, scene_path("default")))
+        std::snprintf(ed.scene_file, sizeof(ed.scene_file), "%s", "default");
+    else
+        ed.scene = make_default_scene();
+    ed.last_committed = scene_to_json(ed.scene);  // undo/redo baseline
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();

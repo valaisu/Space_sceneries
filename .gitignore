@@ -1,4 +1,13 @@
 /build/
+
+# Saved scenes: track only the base/default scene, ignore the rest.
+/scenes/*
+!/scenes/default.json
+# Saved palettes and exported renders are user output.
+/palettes/
+/renders/
+
+# Legacy locations (pre-folders).
 /scene.json
 /default.json
 /render.png

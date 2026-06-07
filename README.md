@@ -15,10 +15,12 @@ the final image toward deliberate pixel-art color.
 - **Rings** — translucent annular disks with radial color ramps, lit from either face.
 - **Suns** — emissive bodies that act as the scene's lights (with hard shadows and
   optional inverse-square falloff).
-- **Starfields** — seeded backgrounds with denser and sparser regions.
-- **Motion** — circular orbits and spin, scrubbable on a timeline so scenes animate.
-- **A pixel-art look** — generated HSV palettes with dithering, applied identically
-  to the viewport and the exported PNG.
+- **Starfields** — seeded backgrounds with denser and sparser (nebula) regions, an
+  optional Milky-Way-style **galactic band**, and animated **shooting stars**.
+- **Motion** — **Kepler elliptic orbits** (and circles) plus spin, scrubbable on a
+  timeline so scenes animate.
+- **A pixel-art look** — generated HSV palettes (saveable to a reusable library) with
+  dithering, applied identically to the viewport and the exported PNG.
 
 ## Build & run
 
@@ -32,4 +34,5 @@ cmake --build build -j     # after editing code
 ./build/space_sceneries_tests    # headless sanity checks
 ```
 
-`scene.json` and `render.png` are written to the working directory.
+Saved scenes go in `scenes/`, saved palettes in `palettes/`, and exported PNGs in
+`renders/` (all created on first run).
