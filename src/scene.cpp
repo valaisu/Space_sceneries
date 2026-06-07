@@ -49,8 +49,8 @@ json to_json(const Material& m) {
     const Terrain& tr = m.terrain;
     if (tr.enabled)
         j["terrain"] = json{{"enabled", tr.enabled}, {"sea_level", tr.sea_level},
-                            {"ocean", to_json(tr.ocean)}, {"cap", tr.cap},
-                            {"cap_color", to_json(tr.cap_color)},
+                            {"ocean", to_json(tr.ocean)}, {"levels", tr.levels},
+                            {"cap", tr.cap}, {"cap_color", to_json(tr.cap_color)},
                             {"cap_season", tr.cap_season},
                             {"season_period", tr.season_period}};
     const Atmosphere& a = m.atmosphere;
@@ -87,6 +87,7 @@ Material material_from_json(const json& j) {
         m.terrain.enabled = t.value("enabled", false);
         m.terrain.sea_level = t.value("sea_level", m.terrain.sea_level);
         if (t.contains("ocean")) m.terrain.ocean = vec3_from_json(t.at("ocean"));
+        m.terrain.levels = t.value("levels", m.terrain.levels);
         m.terrain.cap = t.value("cap", m.terrain.cap);
         if (t.contains("cap_color")) m.terrain.cap_color = vec3_from_json(t.at("cap_color"));
         m.terrain.cap_season = t.value("cap_season", m.terrain.cap_season);
@@ -339,6 +340,25 @@ Vec3 tilted_up(std::mt19937& rng, float amount) {
     return normalize(rotate_about(Vec3(0, 1, 0), axis, ang));
 }
 
+// HSV -> RGB (h wrapped to [0,1)). Used to give some generated worlds an
+// unfamiliar (non-Earth) hue family instead of always green/blue/tan.
+Vec3 hsv(float h, float s, float v) {
+    h -= std::floor(h);
+    float i = std::floor(h * 6.0f);
+    float f = h * 6.0f - i;
+    float p = v * (1.0f - s);
+    float q = v * (1.0f - f * s);
+    float t = v * (1.0f - (1.0f - f) * s);
+    switch (static_cast<int>(i) % 6) {
+        case 0: return Vec3(v, t, p);
+        case 1: return Vec3(q, v, p);
+        case 2: return Vec3(p, v, t);
+        case 3: return Vec3(p, q, v);
+        case 4: return Vec3(t, p, v);
+        default: return Vec3(v, p, q);
+    }
+}
+
 }  // namespace
 
 void generate_system(Scene& scene, const SystemGenParams& p) {
@@ -365,7 +385,10 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
     float r = p.sun_radius + rf(3.0f, 4.5f);  // first orbit clears the sun comfortably
     for (int i = 0; i < count; ++i) {
         float frac = (count > 1) ? static_cast<float>(i) / (count - 1) : 0.0f;
-        bool gas = u01(rng) < 0.2f + 0.55f * frac;  // gas giants grow likelier outward
+        // gas_ratio sets the overall fraction; a mild outward tilt (vanishing at the
+        // 0/1 extremes) keeps inner planets a touch rockier, outer ones gassier.
+        float pgas = p.gas_ratio + p.gas_ratio * (1.0f - p.gas_ratio) * (frac - 0.5f) * 0.8f;
+        bool gas = u01(rng) < pgas;
         float prad = gas ? rf(0.7f, 1.3f) : rf(0.25f, 0.6f);
         orbit_r[i] = r;
         planet_rad[i] = prad;
@@ -386,26 +409,67 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
             m.band_freq = rf(4.0f, 10.0f);
             m.band_var = rf(0.0f, 1.2f);  // uneven stripe widths
             m.warp = rf(0.1f, 0.6f);
-        } else {  // rocky planet: ocean/land terrain with seasonal ice caps
+        } else {  // rocky planet: ocean/land terrain, varied ice caps, sometimes clouds
             m.band_strength = 0.0f;       // terrain wants a pure elevation field
+            m.noise_octaves = 3;          // smoother field -> cleaner posterized regions
             Terrain& tr = m.terrain;
             tr.enabled = true;
             bool watery = u01(rng) < 0.55f;
-            tr.sea_level = watery ? rf(0.42f, 0.6f) : rf(0.0f, 0.2f);  // dry worlds barely flood
-            tr.ocean = watery
+            bool exotic = u01(rng) < 0.3f;  // mostly familiar worlds, sometimes alien hues
+            tr.sea_level = watery ? rf(0.42f, 0.62f) : rf(0.0f, 0.2f);  // dry worlds barely flood
+            Vec3 ocean = watery
                 ? Vec3(rf(0.05f, 0.15f), rf(0.2f, 0.35f), rf(0.45f, 0.65f))   // blue sea
                 : Vec3(rf(0.2f, 0.35f), rf(0.15f, 0.25f), rf(0.1f, 0.2f));    // dark dust basins
-            Vec3 low = watery
-                ? Vec3(rf(0.25f, 0.45f), rf(0.4f, 0.6f), rf(0.2f, 0.35f))     // green lowland
-                : Vec3(rf(0.6f, 0.8f), rf(0.45f, 0.6f), rf(0.3f, 0.45f));     // tan desert
-            Vec3 high = Vec3(rf(0.4f, 0.6f), rf(0.35f, 0.5f), rf(0.3f, 0.45f));  // rocky highland
-            m.tex_ramp = {{0.0f, low}, {1.0f, high}};
-            m.albedo = low;
-            tr.cap = rf(0.7f, 0.95f);
-            tr.cap_color = Vec3(rf(0.88f, 0.97f), rf(0.92f, 0.98f), 1.0f);
-            if (u01(rng) < 0.5f) {  // some worlds breathe seasons
-                tr.cap_season = rf(0.03f, 0.1f);
+            // Three distinct biome colors (coast/sand -> mid -> highland) rather than a
+            // two-color gradient, so posterizing yields clearly different regions.
+            Vec3 c0, c1, c2;
+            if (exotic) {  // an unfamiliar hue family, but still spread in hue + value
+                float h = u01(rng);
+                ocean = hsv(h + rf(0.45f, 0.6f), rf(0.5f, 0.75f), rf(0.25f, 0.45f));
+                c0 = hsv(h,                  rf(0.5f, 0.8f), rf(0.35f, 0.55f));
+                c1 = hsv(h + rf(0.1f, 0.25f), rf(0.5f, 0.8f), rf(0.5f, 0.7f));
+                c2 = hsv(h + rf(0.4f, 0.65f), rf(0.35f, 0.6f), rf(0.65f, 0.85f));
+            } else if (watery) {
+                c0 = Vec3(rf(0.75f, 0.9f), rf(0.7f, 0.85f), rf(0.45f, 0.6f));   // sandy coast
+                c1 = Vec3(rf(0.2f, 0.4f),  rf(0.45f, 0.65f), rf(0.2f, 0.35f));  // green
+                c2 = Vec3(rf(0.45f, 0.6f), rf(0.4f, 0.5f),   rf(0.35f, 0.45f)); // rock
+            } else {  // dry / desert
+                c0 = Vec3(rf(0.8f, 0.95f), rf(0.7f, 0.85f), rf(0.5f, 0.65f));   // pale sand
+                c1 = Vec3(rf(0.6f, 0.8f),  rf(0.4f, 0.55f),  rf(0.25f, 0.4f));  // rust
+                c2 = Vec3(rf(0.35f, 0.5f), rf(0.3f, 0.4f),   rf(0.25f, 0.35f)); // dark rock
+            }
+            tr.ocean = ocean;
+            m.tex_ramp = {{0.0f, c0}, {0.5f, c1}, {1.0f, c2}};
+            m.albedo = c1;
+            // Posterize into crisp bands on most worlds; a few stay smooth for variety.
+            tr.levels = (u01(rng) < 0.8f) ? 3 : 0;
+            // Ice caps vary widely: from none, through small, to a frozen world.
+            float caproll = u01(rng);
+            if (caproll < 0.2f) tr.cap = 1.1f;                  // no caps
+            else if (caproll < 0.35f) tr.cap = rf(0.3f, 0.5f);  // frozen: big caps
+            else tr.cap = rf(0.5f, 0.9f);                       // varied, often clearly visible
+            tr.cap_color = (u01(rng) < 0.75f)
+                ? Vec3(rf(0.88f, 0.97f), rf(0.92f, 0.98f), 1.0f)            // white-blue ice
+                : Vec3(rf(0.85f, 0.97f), rf(0.7f, 0.85f), rf(0.6f, 0.8f));  // tinted (dust/CO2)
+            if (tr.cap < 1.0f && u01(rng) < 0.6f) {  // most capped worlds breathe seasons
+                tr.cap_season = rf(0.06f, 0.18f);
                 tr.season_period = rf(20.0f, 60.0f);
+            }
+            // Clouds on some worlds (commoner when watery); not necessarily white.
+            if (u01(rng) < (watery ? 0.6f : 0.3f)) {
+                Clouds& cl = m.clouds;
+                cl.enabled = true;
+                cl.scale = rf(3.0f, 6.0f);
+                cl.octaves = 4;
+                cl.coverage = rf(0.4f, 0.65f);
+                cl.opacity = rf(0.5f, 0.9f);
+                cl.drift = rf(-0.05f, 0.05f);
+                float croll = u01(rng);
+                Vec3 cc = (croll < 0.55f) ? Vec3(1.0f, 1.0f, 1.0f)            // white
+                        : exotic          ? hsv(u01(rng), rf(0.25f, 0.5f), 1.0f)  // alien tint
+                                          : Vec3(rf(0.9f, 1.0f), rf(0.82f, 0.95f),
+                                                 rf(0.7f, 0.9f));             // warm haze
+                cl.ramp = {{0.0f, cc, 0.0f}, {1.0f, cc, 1.0f}};
             }
         }
         if (p.atmospheres && u01(rng) < 0.45f) {
@@ -497,13 +561,15 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
 
     scene.bodies = std::move(bodies);
 
-    // Reframe: orbit a planet (prefer a gas giant) and look at it, so a generated
-    // system opens on a moving close-up of a planet rather than a static wide shot.
-    std::vector<int> giants;
+    // Reframe: orbit a planet and look at it, so a generated system opens on a
+    // moving close-up rather than a static wide shot. hero_kind picks the type:
+    // 0 prefers a gas giant (the default close-up), 1 wants a rocky/terrain world
+    // (shows off oceans + caps), 2 forces a gas giant. Falls back to any planet.
+    std::vector<int> prefer;
     for (int i = 0; i < count; ++i)
-        if (is_gas[i]) giants.push_back(i);
-    int fp = giants.empty() ? ri(0, count - 1)
-                            : giants[ri(0, static_cast<int>(giants.size()) - 1)];
+        if ((p.hero_kind == 1) ? !is_gas[i] : (bool)is_gas[i]) prefer.push_back(i);
+    int fp = prefer.empty() ? ri(0, count - 1)
+                            : prefer[ri(0, static_cast<int>(prefer.size()) - 1)];
     float fr = planet_rad[fp];
     scene.cam.orbit.active = true;
     scene.cam.orbit.parent = planet_idx[fp];  // circle the chosen planet
@@ -526,10 +592,26 @@ void generate_eclipse_system(Scene& scene, const SystemGenParams& p,
     // Bias toward a more spread-out, tilted system so fewer planets crowd the view
     // and read as fully dark (issue: too many whole-planet shadows). Floors only —
     // the user can still push spacing/tilt higher from the Generate tab.
+    std::mt19937 erng(static_cast<uint32_t>(p.seed) * 2654435761u + 12345u);
+    std::uniform_real_distribution<float> eu(0.0f, 1.0f);
+
     SystemGenParams q = p;
-    q.spacing = std::max(p.spacing, 1.8f);
+    q.spacing = std::max(p.spacing, 2.0f);  // keep neighbours comfortably apart in frame
     q.inclination = std::max(p.inclination, 0.4f);
+    // Pick the close-up hero type at random each cycle (seed bumps per cycle), so the
+    // loop mixes rocky/ocean worlds and gas giants without a predictable A-B-A-B
+    // pattern. Moons aren't eligible — the eclipse geometry needs a sun-orbiting hero.
+    q.hero_kind = (eu(erng) < 0.5f) ? 1 : 2;
     generate_system(scene, q);  // reuse all the body/texture/ring/moon generation
+
+    // Slow the moons relative to the cycle: generate_system gives them short Keplerian
+    // periods that whir around many times per cycle and wreck the calm. Re-time each to
+    // ~1-2.5 cycles per orbit so they drift gently. (Rings are disks; skipped here.)
+    for (auto& b : scene.bodies)
+        if (b.orbit.active && b.orbit.parent != 0)
+            if (auto s = std::dynamic_pointer_cast<Sphere>(b.shape))
+                if (!s->material.emissive)
+                    b.orbit.period = T * (1.0f + 1.5f * eu(erng));
 
     // Shrink the inner planets (small near the sun, full size out where the
     // foreground gas giant lives). Planets are the non-emissive spheres orbiting

@@ -543,11 +543,28 @@ static void surface_texture() {
     Vec3 pole = terrain_color(e, normalize(Vec3(0.05f, 1.0f, 0.05f)), 0.0f);
     assert(pole.x > 0.7f && pole.z > 0.7f);
 
+    // Posterize: with levels=3 the land lands on exactly the ramp's stop colors, so
+    // every sample is one of 3 flat shades (a smooth gradient would hit in-between
+    // values). This is what gives crisp region boundaries instead of mush.
+    Material q;
+    q.pattern = 2;
+    q.terrain.enabled = true;
+    q.terrain.sea_level = 0.0f;  // all land, so all 3 bands are reachable
+    q.terrain.cap = 2.0f;        // no caps
+    q.terrain.levels = 3;
+    q.tex_ramp = {{0.0f, Vec3(0.2f, 0, 0)}, {0.5f, Vec3(0.5f, 0, 0)}, {1.0f, Vec3(0.9f, 0, 0)}};
+    for (int i = 0; i < 400; ++i) {
+        Vec3 d = normalize(Vec3(std::sin(i * 0.3f), std::cos(i * 0.7f), std::sin(i * 0.13f)));
+        float x = terrain_color(q, d, 0.0f).x;
+        assert(approx(x, 0.2f) || approx(x, 0.5f) || approx(x, 0.9f));
+    }
+
     // JSON round-trips the new texture fields.
     Scene scene;
     g.band_var = 0.7f;
     g.terrain.enabled = true;
     g.terrain.sea_level = 0.4f;
+    g.terrain.levels = 4;
     g.clouds.enabled = true;
     g.clouds.drift = 0.05f;
     auto sp = std::make_shared<Sphere>(Vec3(0, 0, 0), 1.0f, g);
@@ -558,6 +575,7 @@ static void surface_texture() {
            bs->material.noise_octaves == 4 && approx(bs->material.band_freq, 4.0f));
     assert(approx(bs->material.band_var, 0.7f) && bs->material.terrain.enabled &&
            approx(bs->material.terrain.sea_level, 0.4f) &&
+           bs->material.terrain.levels == 4 &&
            approx(bs->material.clouds.drift, 0.05f));
 }
 
@@ -752,6 +770,50 @@ static void system_gen() {
                 }
             }
         }
+    }
+
+    // hero_kind reframes the close-up onto the requested planet type (the eclipse
+    // loop rotates this each cycle). Gas planets carry pattern 1, rocky pattern 2.
+    // Only assert when that type actually exists in the system (else it falls back).
+    auto hero_pattern = [](const Scene& s) {
+        auto h = std::dynamic_pointer_cast<Sphere>(s.bodies[s.cam.target].shape);
+        return h ? h->material.pattern : 0;
+    };
+    auto has_pattern = [](const Scene& s, int pat) {
+        for (size_t i = 1; i < s.bodies.size(); ++i)
+            if (auto sp = std::dynamic_pointer_cast<Sphere>(s.bodies[i].shape))
+                if (sp->material.pattern == pat) return true;
+        return false;
+    };
+    for (int seed = 1; seed <= 8; ++seed) {
+        SystemGenParams p;
+        p.seed = seed;
+        p.planet_count = 8;
+        Scene rocky;
+        p.hero_kind = 1;
+        generate_system(rocky, p);
+        if (has_pattern(rocky, 2)) assert(hero_pattern(rocky) == 2);
+        Scene gas;
+        p.hero_kind = 2;
+        generate_system(gas, p);
+        if (has_pattern(gas, 1)) assert(hero_pattern(gas) == 1);
+    }
+
+    // Eclipse loop slows its moons to at least one cycle per orbit, so they drift
+    // calmly instead of whirring around many times per scene.
+    for (int seed = 1; seed <= 6; ++seed) {
+        SystemGenParams p;
+        p.seed = seed;
+        p.planet_count = 5;
+        p.max_moons = 3;
+        Scene s;
+        float secs = 20.0f;
+        generate_eclipse_system(s, p, secs, 2);
+        for (const auto& b : s.bodies)
+            if (b.orbit.active && b.orbit.parent != 0)
+                if (auto sp = std::dynamic_pointer_cast<Sphere>(b.shape))
+                    if (!sp->material.emissive)
+                        assert(b.orbit.period >= secs - 1e-3f);  // >= one cycle per orbit
     }
 }
 
