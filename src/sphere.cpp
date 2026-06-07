@@ -61,16 +61,24 @@ float surface_field(const Material& m, Vec3 p) {
 
 Vec3 terrain_color(const Material& m, Vec3 p, float season_swing) {
     const Terrain& t = m.terrain;
+    // Posterize a [0,1] value into `t.levels` flat steps so colored regions get crisp
+    // boundaries instead of a smooth (mushy) gradient. n<=1 leaves it continuous.
+    auto step = [&](float x, int n) {
+        if (n <= 1) return x;
+        int b = std::min(n - 1, static_cast<int>(x * n));
+        return static_cast<float>(b) / (n - 1);
+    };
     float e = surface_field(m, p);  // elevation [0,1] (fbm; band_strength stays 0)
     Vec3 base;
     if (e < t.sea_level) {
         // Ocean: darken toward 0 elevation so deep water reads deeper than coast.
         float depth = (t.sea_level > 1e-4f) ? e / t.sea_level : 1.0f;  // 0 deep .. 1 shore
+        if (t.levels > 1) depth = step(depth, 2);  // shelf + deep, crisp coast
         base = t.ocean * (0.5f + 0.5f * depth);
     } else {
-        // Land height remapped to [0,1] and colored by the ramp (low->high).
+        // Land height remapped to [0,1], posterized, then colored by the ramp.
         float land = (e - t.sea_level) / std::max(1e-4f, 1.0f - t.sea_level);
-        base = surface_color(m, land);
+        base = surface_color(m, step(land, t.levels));
     }
     // Polar ice caps: |p.y| is the sine of latitude. Perturb the test by elevation
     // noise so the cap rim is ragged, not a clean parallel; season_swing moves it.

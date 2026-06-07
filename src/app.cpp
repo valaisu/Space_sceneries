@@ -589,6 +589,9 @@ void draw_object_tab(Editor& ed) {
             if (tr.enabled) {
                 ImGui::TextDisabled("Surface colors above are the land ramp (low->high)");
                 ImGui::SliderFloat("Sea level", &tr.sea_level, 0.0f, 1.0f);
+                ImGui::SliderInt("Bands", &tr.levels, 0, 8);
+                ImGui::SetItemTooltip("0 = smooth gradient; 2+ = posterize land into "
+                                      "flat regions with crisp boundaries.");
                 ImGui::ColorEdit3("Ocean", &tr.ocean.x);
                 ImGui::SliderFloat("Cap latitude", &tr.cap, 0.0f, 1.0f);
                 ImGui::ColorEdit3("Cap color", &tr.cap_color.x);
@@ -847,6 +850,9 @@ void draw_generate_tab(Editor& ed) {
     ImGui::SeparatorText("System");
     ImGui::InputInt("Seed", &g.seed);
     ImGui::SliderInt("Planets", &g.planet_count, 1, 8);
+    ImGui::SliderFloat("Gas giant ratio", &g.gas_ratio, 0.0f, 1.0f);
+    ImGui::SetItemTooltip("Fraction of planets that are gas giants (0 = all rocky, "
+                          "1 = all gas). Inner planets stay a little rockier.");
     ImGui::SliderInt("Max moons / planet", &g.max_moons, 0, 4);
     drag_scale("Sun radius", &g.sun_radius, 0.3f, 6.0f);
 
@@ -1349,6 +1355,12 @@ void draw_viewport(Editor& ed) {
     ImGuiIO& io = ImGui::GetIO();
     if (ed.xmode == XMode::None && hovered && !io.WantTextInput) {
         if (ImGui::IsKeyPressed(ImGuiKey_Space)) ed.playing = !ed.playing;
+        // N: jump to the next eclipse cycle (regenerate) — a dev shortcut for quickly
+        // flipping through generated planets without waiting out the cycle.
+        if (ImGui::IsKeyPressed(ImGuiKey_N) && ed.infinite_mode) {
+            ed.time = 0.0f;
+            eclipse_next_cycle(ed);
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_0) || ImGui::IsKeyPressed(ImGuiKey_Keypad0))
             ed.look_through_camera = !ed.look_through_camera;
 

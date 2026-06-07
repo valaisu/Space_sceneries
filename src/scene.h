@@ -70,6 +70,8 @@ struct SystemGenParams {
     float eccentricity = 0.1f;  // 0 = circular .. this is the per-orbit max
     bool  rings = true;         // allow rings on some gas giants
     bool  atmospheres = true;   // allow atmospheric glow on some planets
+    float gas_ratio = 0.5f;     // ~fraction of planets that are gas giants (0 = all rocky)
+    int   hero_kind = 0;        // reframe target: 0 = prefer gas giant, 1 = rocky, 2 = gas
 };
 
 // Replace `scene.bodies` with a freshly generated system (sun at body 0, then
@@ -89,6 +91,8 @@ void generate_system(Scene& scene, const SystemGenParams& p);
 // parks the planet). The framing (distance/FOV) is identical every cycle and the
 // sun radius is clamped to stay hidden, so the editor can regenerate the whole
 // system at the dark moment with a seamless cut. Cycle length = scene_seconds.
+// The close-up hero alternates type each cycle (rocky world vs gas giant, via
+// `hero_kind` keyed off the per-cycle seed) so the loop doesn't repeat one look.
 void generate_eclipse_system(Scene& scene, const SystemGenParams& p,
                              float scene_seconds, int cam_loops);
 

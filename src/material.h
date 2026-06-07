@@ -64,6 +64,8 @@ struct Terrain {
     bool  enabled = false;
     float sea_level = 0.5f;            // elevation threshold: below = ocean
     Vec3  ocean{0.10f, 0.22f, 0.45f};  // shoreline water (deepens toward 0 elevation)
+    int   levels = 0;                  // 0 = smooth gradient; >1 = posterize land into
+                                       // that many flat bands with crisp boundaries
     float cap = 0.85f;                 // |latitude| above this -> ice (>=1 = no cap)
     Vec3  cap_color{0.92f, 0.96f, 1.0f};
     float cap_season = 0.0f;           // seasonal cap-edge swing amplitude (0 = static)

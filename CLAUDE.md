@@ -109,7 +109,11 @@ unit-tested.
 `pattern != 0`, replacing the scalar field→ramp path for the base albedo). It reuses
 the fbm field as **elevation**: below `sea_level` is **ocean** (the `ocean` color,
 darkened toward 0 elevation for depth), above is **land** colored by `tex_ramp`
-sampled by land height (low→high → lowland→mountain). **Polar ice caps** blend toward
+sampled by land height (low→high → lowland→mountain). `levels` **posterizes** the land
+(and ocean depth) into that many flat steps, so colored regions get **crisp boundaries**
+instead of a smooth gradient (0 = smooth); the generator pairs `levels=3` with a 3-color
+biome ramp so each band is a distinct region — the fix for "uniform mush" planets.
+**Polar ice caps** blend toward
 `cap_color` where `|latitude|` exceeds `cap`, with a noise-raggedized rim. The cap edge
 **swings with the seasons**: `cap_season` × sin(time/`season_period`) is baked into the
 sphere's `season_swing` at pose time, so caps slowly grow/shrink while the timeline
@@ -161,15 +165,21 @@ near the terminator. Purely additive — **no transparency, no second ray.**
 
 **System generation.** `generate_system(scene, SystemGenParams)` (in `core`/scene.cpp)
 replaces `scene.bodies` with a random system and reframes `scene.cam` — it sets the
-render camera to **orbit a planet** (preferring a gas giant) and `Target`-track it, so a
+render camera to **orbit a planet** and `Target`-track it (which planet is picked by
+`hero_kind`: 0 prefers a gas giant — the default — 1 a rocky/terrain world, 2 forces a
+gas giant; falls back to any planet), so a
 generated system opens on a moving close-up rather than a static wide shot — leaving
 background/palette/resolution alone. Real systems are loose inspiration: a central
 emissive **sun** (body 0), then planets on **geometrically growing orbits** (each ≈
 `spacing` × the previous radius, +jitter; Kepler-ish `period ∝ R^1.5`), inner ones small
-& **rocky** (ocean/land **terrain** — water worlds with blue seas + green land + ice caps,
-or dry/desert worlds — some with seasonal caps), outer ones likelier **gas giants**
-(banded texture with varied stripe widths, sometimes a ring + atmosphere). Moons are
-mottled, some with polar caps. Orbits are near-coplanar (small `inclination` tilt) with optional
+& **rocky** (ocean/land **terrain** — water worlds with blue seas + green land, or
+dry/desert worlds; a **3-color biome ramp posterized into flat bands** so regions read
+crisply; ice caps vary from none through small to a frozen world, sometimes seasonal;
+some get **drifting clouds**, not always white; ~30% are **exotic**, an HSV hue family
+shifted off Earth-like greens/blues), outer ones likelier **gas giants**
+(banded texture with varied stripe widths, sometimes a ring + atmosphere). The overall
+rocky↔gas split is set by `gas_ratio` (a mild outward tilt keeps inner planets rockier).
+Moons are mottled, some with polar caps. Orbits are near-coplanar (small `inclination` tilt) with optional
 `eccentricity`. **Moons stay bubbled:** a planet's moon orbit is capped at `0.4 ×` the
 *worst-case* clearance to either neighbouring orbit (computed from their perihelion/
 aphelion edges) — strictly less than half the gap — so a moon is always closer to its
@@ -190,7 +200,14 @@ apparent motion speed is constant across scenes regardless of orbit sizes): the 
 makes `cam_loops` revolutions per cycle (`period = T/cam_loops`) and the planet does
 `cam_loops-1` orbits (`period = T/(cam_loops-1)`), so camera & anti-sun realign **exactly
 once per cycle** (one eclipse), with a full reveal at mid-cycle. `cam_loops == 1` parks the
-planet (`(0,0,-R)`, orbit off) for the calmest, pure-camera sweep. Because the camera
+planet (`(0,0,-R)`, orbit off) for the calmest, pure-camera sweep. The **close-up hero is a
+random type each cycle** (`hero_kind` chosen 50/50: rocky/ocean world vs gas giant), so the
+loop showcases terrain + caps + a backlit-atmosphere crescent on some cycles and a banded
+giant on others, with no predictable A-B-A-B pattern. Moons aren't eligible heroes — the
+eclipse frame needs a **sun-orbiting** hero (`R` = its solar orbit). Two more loop-only
+tweaks keep the vibe calm: the spacing floor is raised (neighbours sit farther apart in
+frame) and **every moon is re-timed to ≥ one cycle per orbit** (`generate_system`'s short
+Keplerian moon periods otherwise whir around many times per scene). Because the camera
 orientation + FOV are identical every eclipse and the starfield is hashed by ray
 *direction* only, the cut is **seamless** (no star/framing jump). The editor's "Infinite
 mode" (app.cpp) drives this: while playing it wraps `time` at `scene_seconds`, calls
@@ -266,12 +283,14 @@ sky preview); **Stylize** holds the palette post-process (incl. the `base_hue` s
 sphere's material/texture, **clouds** layer, and atmosphere (with a neutral-light
 material preview), or a ring's color ramp. Color-ramp rows expose a per-stop **alpha**
 slider. The **Generate** tab drives the random system generator (see below):
-seed/planet-count/moons/spacing/inclination/eccentricity knobs + rings/atmosphere
-toggles, with **Generate** / **Randomize** buttons that replace all bodies (Undo
+seed/planet-count/moons/spacing/inclination/eccentricity knobs + a **gas-giant ratio**
+slider (`gas_ratio`: fraction of planets that are gas giants, 0 = all rocky) +
+rings/atmosphere toggles, with **Generate** / **Randomize** buttons that replace all bodies (Undo
 recovers the prior scene). Its **Eclipse loop** section (mirrored by an **Infinite**
 checkbox on the Timeline) toggles the infinite self-renewing mode, with a
 **Scene seconds** slider (fixed per-scene duration), a **Camera loops** knob
-(1–3), a **Morph/Snap** palette-transition combo and a **Regenerate now** button. The
+(1–3), a **Morph/Snap** palette-transition combo and a **Regenerate now** button (also
+**`N`** while in infinite mode — a dev shortcut to jump straight to the next cycle). The
 `render_material_preview` / `render_background_preview`
 thumbnails live in `core` (neutral lighting, no post-process) so the texture/sky read true.
 
