@@ -5,7 +5,7 @@
 !/scenes/default.json
 # Saved palettes and exported renders are user output.
 /palettes/
-/renders/
+/renders/*
 
 # Legacy locations (pre-folders).
 /scene.json
@@ -13,3 +13,6 @@
 /render.png
 
 .claude
+
+!renders/animation_800x400_0.gif
+!renders/animation_800x400_1.gif
