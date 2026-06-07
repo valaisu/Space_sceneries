@@ -167,6 +167,16 @@ struct Editor {
     // Random star-system generator controls (the Generate tab).
     SystemGenParams gen;
 
+    // "Infinite eclipse loop" mode: while playing, regenerate the whole system at
+    // each eclipse (once per foreground-planet orbit), morphing the palette across
+    // the cycle. cycle_len = the foreground planet's orbital period.
+    bool infinite_mode = false;
+    float cycle_len = 0.0f;
+    float scene_seconds = 30.0f;         // fixed duration of each scene (constant motion speed)
+    int cam_loops = 2;                   // camera revolutions per scene (1 = calm, parked planet)
+    std::vector<Vec3> pal_from, pal_to;  // palette morph endpoints
+    int pal_transition = 0;              // 0 = Morph across the cycle, 1 = Snap at eclipse
+
     // Active modal transform + the snapshot taken when it began (for cancel).
     XMode xmode = XMode::None;
     ImVec2 x_start_mouse{0, 0};
@@ -763,6 +773,56 @@ void do_generate(Editor& ed) {
     force_redraw(ed);
 }
 
+// ---- Infinite eclipse loop -------------------------------------------------
+// Generate a fresh harmonic palette in place (the Stylize "Randomize" recipe:
+// walk the base hue by the golden ratio + bump the seed for a distinct hue).
+void roll_palette(PostProcess& pp) {
+    pp.palette_seed++;
+    pp.base_hue += 0.61803398f;
+    if (pp.base_hue >= 1.0f) pp.base_hue -= 1.0f;
+    generate_palette(pp);
+}
+
+// Enter infinite mode: generate the first eclipse system and start playing.
+void start_infinite(Editor& ed) {
+    ed.gen.seed++;
+    generate_eclipse_system(ed.scene, ed.gen, ed.scene_seconds, ed.cam_loops);
+    ed.cycle_len = ed.scene_seconds;
+    ed.time = 0.0f;
+    ed.pal_to = ed.scene.post.palette;
+    ed.pal_from = ed.pal_to;  // no morph on the very first cycle
+    ed.selected = SEL_NONE;
+    ed.infinite_mode = true;
+    ed.playing = true;
+    force_redraw(ed);
+}
+
+// Hidden swap at the eclipse: regenerate everything and roll the palette forward.
+void eclipse_next_cycle(Editor& ed) {
+    ed.gen.seed++;
+    generate_eclipse_system(ed.scene, ed.gen, ed.scene_seconds, ed.cam_loops);
+    ed.selected = SEL_NONE;
+    ed.cycle_len = ed.scene_seconds;
+    ed.pal_from = ed.pal_to;
+    roll_palette(ed.scene.post);
+    ed.pal_to = ed.scene.post.palette;
+    force_redraw(ed);
+}
+
+// Drive the live palette between the cycle endpoints (Morph) or hold the target
+// (Snap). Called every frame while infinite mode is on.
+void drive_palette(Editor& ed) {
+    if (ed.pal_from.empty() || ed.pal_to.empty()) return;
+    float u = (ed.pal_transition == 1 || ed.cycle_len <= 0.0f)
+                  ? 1.0f
+                  : std::clamp(ed.time / ed.cycle_len, 0.0f, 1.0f);
+    size_t n = std::min(ed.pal_from.size(), ed.pal_to.size());
+    std::vector<Vec3>& pal = ed.scene.post.palette;
+    if (pal.size() != n) pal.resize(n);
+    for (size_t i = 0; i < n; ++i)
+        pal[i] = ed.pal_from[i] * (1.0f - u) + ed.pal_to[i] * u;
+}
+
 // Generate tab: knobs for the procedural star-system generator.
 void draw_generate_tab(Editor& ed) {
     SystemGenParams& g = ed.gen;
@@ -791,6 +851,26 @@ void draw_generate_tab(Editor& ed) {
     if (ImGui::Button("Generate system")) do_generate(ed);
     ImGui::SameLine();
     if (ImGui::Button("Randomize")) { g.seed++; do_generate(ed); }
+
+    ImGui::SeparatorText("Eclipse loop");
+    ImGui::TextWrapped("Play an endless self-renewing scene: the camera orbits a "
+                       "planet eclipsing the sun; at each eclipse the whole system "
+                       "regenerates. Toggle from the Timeline or here.");
+    if (ImGui::Checkbox("Infinite mode", &ed.infinite_mode)) {
+        if (ed.infinite_mode) start_infinite(ed);
+    }
+    ImGui::SliderFloat("Scene seconds", &ed.scene_seconds, 5.0f, 120.0f, "%.0f s");
+    ImGui::SetItemTooltip("How long each scene lasts. Fixed, so the motion speed is "
+                          "the same in every scene. Applies from the next cycle.");
+    ImGui::SliderInt("Camera loops", &ed.cam_loops, 1, 3);
+    ImGui::SetItemTooltip("Camera revolutions per scene. 1 = calm (planet parked), "
+                          "2 = planet orbits once, 3 = busier.");
+    const char* trans[] = {"Morph", "Snap"};
+    ImGui::Combo("Palette transition", &ed.pal_transition, trans, 2);
+    if (ImGui::Button("Regenerate now") && ed.infinite_mode) {
+        ed.time = 0.0f;
+        eclipse_next_cycle(ed);
+    }
 }
 
 void draw_properties(Editor& ed) {
@@ -812,6 +892,11 @@ void draw_timeline(Editor& ed) {
     if (ImGui::Button(ed.playing ? "Pause" : "Play")) ed.playing = !ed.playing;
     ImGui::SameLine();
     if (ImGui::Button("Reset")) ed.time = 0.0f;
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Infinite", &ed.infinite_mode)) {
+        if (ed.infinite_mode) start_infinite(ed);
+    }
+    ImGui::SetItemTooltip("Endless self-renewing eclipse loop (Generate tab for options).");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(140.0f);
     ImGui::DragFloat("Speed", &ed.play_speed, 0.05f, 0.0f, 100.0f);
@@ -1342,6 +1427,16 @@ void layout_and_draw(Editor& ed) {
 
     // Advance animation time while playing (orbits/spin pose from `time`).
     if (ed.playing) ed.time += io.DeltaTime * ed.play_speed;
+
+    // Infinite eclipse loop: regenerate the whole system once per cycle (at the
+    // dark eclipse moment) and morph the palette across the cycle.
+    if (ed.infinite_mode) {
+        if (ed.cycle_len > 0.0f && ed.time >= ed.cycle_len) {
+            ed.time -= ed.cycle_len;
+            eclipse_next_cycle(ed);
+        }
+        drive_palette(ed);
+    }
 
     // Global shortcuts (suppressed while typing in a text field).
     if (!io.WantTextInput && io.KeyCtrl) {
