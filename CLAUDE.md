@@ -49,7 +49,7 @@ Core math / geometry (header-only unless noted):
 - `motion.h` — `Orbit`, `Spin`, `Body` (a shape + its motion).
 - `render.h` / `render.cpp` — `Light`, `ShadeMode`, `Background` (starfield + density regions); shading (`ray_color`: ambient + summed per-light diffuse + hard shadows; `atmosphere_glow`; `background`); `hit_world`; `render_view` / `render_scene` (scene → RGBA8, then `apply_post`); `render_material_preview` / `render_background_preview` (neutral-light editor thumbnails, no post).
 - `post.h` / `post.cpp` — `PostProcess`, `DitherMode`; `generate_palette` (HSV harmonic palettes; a `scheme` selector — `Anchors` line (0/1/2/3 anchor colors + `spread` hue-fan) or rule-based `Monochromatic`/`Complementary`/`Triadic`/`Analogous` ramped dark→light — plus a `base_hue` rotation + seeded `randomness`) + `apply_post` (blur → quantize/dither over the RGBA8 buffer). In `core`, no UI deps.
-- `scene.h` / `scene.cpp` — `Scene`, `SceneCamera` (+ `CamLook`), JSON save/load, posing (`body_world_pos`, `world_at_time`, `orbit_ring_point`, `camera_eye`, `scene_camera`), and the **random system generator** (`SystemGenParams` + `generate_system`).
+- `scene.h` / `scene.cpp` — `Scene`, `SceneCamera` (+ `CamLook`), JSON save/load, posing (`body_world_pos`, `world_at_time`, `orbit_ring_point`, `camera_eye`, `scene_camera`), and the **random system generator** (`SystemGenParams` + `generate_system`, plus `generate_eclipse_system` — the infinite-loop variant that fits the foreground planet + camera into a fixed eclipse frame).
 
 Executables:
 - `app.cpp` — the editor (ImGui + GLFW + OpenGL). **GUI-only.**
@@ -158,6 +158,27 @@ parent than to any other planet or the sun. That invariant is unit-tested (`syst
 in tests.cpp). Moons also start outside the planet's radius and any ring. Params aren't
 serialized (they're transient authoring controls held by the editor, not the `Scene`).
 
+**Infinite eclipse loop.** `generate_eclipse_system(scene, SystemGenParams, scene_seconds,
+cam_loops)` (scene.cpp) builds a normal system via `generate_system` — with the params
+**biased toward more spacing + tilt** and the **inner planets shrunk** (0.6×→1.0× by orbit
+index) so fewer bodies crowd the view and read as fully dark — then **fits the foreground
+planet + render camera into a fixed canonical eclipse frame**: the planet is forced
+circular/coplanar (`e=0`, `normal=+Y`, `phase=π`) so at `t=0` it sits at `(0,0,-R)`; the
+camera orbits it in the same plane (`phase=π`, `radius=6·r_planet`, `fov=50`), so at `t=0`
+it looks **+Z** at the planet with the sun directly behind it (an eclipse), and the sun
+radius is clamped to stay hidden. **Each cycle lasts exactly `scene_seconds`** (so the
+apparent motion speed is constant across scenes regardless of orbit sizes): the camera
+makes `cam_loops` revolutions per cycle (`period = T/cam_loops`) and the planet does
+`cam_loops-1` orbits (`period = T/(cam_loops-1)`), so camera & anti-sun realign **exactly
+once per cycle** (one eclipse), with a full reveal at mid-cycle. `cam_loops == 1` parks the
+planet (`(0,0,-R)`, orbit off) for the calmest, pure-camera sweep. Because the camera
+orientation + FOV are identical every eclipse and the starfield is hashed by ray
+*direction* only, the cut is **seamless** (no star/framing jump). The editor's "Infinite
+mode" (app.cpp) drives this: while playing it wraps `time` at `scene_seconds`, calls
+`generate_eclipse_system`, and **morphs the palette** between cycles (lerp old→new across
+the cycle, or Snap at the eclipse) so the colors — incl. the starfield — drift as a
+"something changed" cue. `scene_seconds`/`cam_loops`/transition are editor controls.
+
 **Rendering & post (Stage 3).** `render_view` shoots one primary ray per pixel, shades
 the nearest hit, composites stars on misses, then runs `apply_post`. Its per-pixel
 loop is **OpenMP-parallel over rows** (`#pragma omp parallel for`; read-only over the
@@ -228,7 +249,11 @@ material preview), or a ring's color ramp. Color-ramp rows expose a per-stop **a
 slider. The **Generate** tab drives the random system generator (see below):
 seed/planet-count/moons/spacing/inclination/eccentricity knobs + rings/atmosphere
 toggles, with **Generate** / **Randomize** buttons that replace all bodies (Undo
-recovers the prior scene). The `render_material_preview` / `render_background_preview`
+recovers the prior scene). Its **Eclipse loop** section (mirrored by an **Infinite**
+checkbox on the Timeline) toggles the infinite self-renewing mode, with a
+**Scene seconds** slider (fixed per-scene duration), a **Camera loops** knob
+(1–3), a **Morph/Snap** palette-transition combo and a **Regenerate now** button. The
+`render_material_preview` / `render_background_preview`
 thumbnails live in `core` (neutral lighting, no post-process) so the texture/sky read true.
 
 ## Conventions & gotchas

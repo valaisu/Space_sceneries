@@ -77,6 +77,21 @@ struct SystemGenParams {
 // background, palette and output resolution untouched.
 void generate_system(Scene& scene, const SystemGenParams& p);
 
+// "Infinite eclipse loop" variant. Builds a normal system via generate_system
+// (with the params biased toward a more spread-out, tilted system so fewer bodies
+// read as fully dark), shrinks the inner planets, then fits the foreground planet
+// + render camera into a fixed canonical frame so that at t = 0 (and once per
+// `scene_seconds` thereafter) the camera looks +Z at the planet with the sun
+// directly behind it — an eclipse. One cycle lasts exactly `scene_seconds`
+// regardless of orbit sizes, so the apparent motion speed is constant across
+// scenes; the camera makes `cam_loops` revolutions per cycle (the planet does
+// `cam_loops - 1` orbits, keeping exactly one eclipse per cycle; cam_loops == 1
+// parks the planet). The framing (distance/FOV) is identical every cycle and the
+// sun radius is clamped to stay hidden, so the editor can regenerate the whole
+// system at the dark moment with a seamless cut. Cycle length = scene_seconds.
+void generate_eclipse_system(Scene& scene, const SystemGenParams& p,
+                             float scene_seconds, int cam_loops);
+
 // Phase 3 / 5.2: JSON round-trip. Returns/accepts a pretty-printed JSON string.
 std::string scene_to_json(const Scene& scene);
 Scene scene_from_json(const std::string& text);
