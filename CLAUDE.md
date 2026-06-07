@@ -42,9 +42,9 @@ build, configure a separate tree explicitly: `-DCMAKE_BUILD_TYPE=Debug` (slower)
 Core math / geometry (header-only unless noted):
 - `vec3.h` — `Vec3` + dot/cross/normalize/length + `rotate_about` (Rodrigues).
 - `ray.h` — `Ray`.
-- `material.h` — `Material` (albedo + emissive + `two_sided` + 3D procedural texture fields + ring/tex `ColorStop` ramps + `Atmosphere` + `Clouds`), `ColorStop` (carries per-stop `alpha`) + `sample_color_ramp` (optional alpha out-param), `Atmosphere`, `Clouds`.
+- `material.h` — `Material` (albedo + emissive + `two_sided` + 3D procedural texture fields incl. `band_var` + ring/tex `ColorStop` ramps + `Terrain` + `Atmosphere` + `Clouds`), `ColorStop` (carries per-stop `alpha`) + `sample_color_ramp` (optional alpha out-param), `Terrain` (rocky ocean/land + seasonal polar caps), `Atmosphere`, `Clouds` (incl. `drift`).
 - `hittable.h` — `Hittable` base (virtual `hit` + `clone`, plus `center` and `name`), `HitRecord`.
-- `sphere.h` / `sphere.cpp`, `disk.h` / `disk.cpp` — the two primitives + ray intersection. `sphere.cpp` also has `surface_field`/`surface_color` (3D object-space texture) and composites the translucent **cloud layer** over the base surface; `disk.cpp` samples the radial ring ramp.
+- `sphere.h` / `sphere.cpp`, `disk.h` / `disk.cpp` — the two primitives + ray intersection. `sphere.cpp` also has `surface_field`/`surface_color` (3D object-space texture), `terrain_color` (rocky ocean/land + caps), and composites the translucent **cloud layer** over the base surface; `disk.cpp` samples the radial ring ramp.
 - `camera.h` — LookAt `Camera`: `get_ray` (rays), `project` (world→screen, the exact inverse, used for overlays), and `right`/`up`/`forward` basis accessors (used by viewport transforms).
 - `motion.h` — `Orbit`, `Spin`, `Body` (a shape + its motion).
 - `render.h` / `render.cpp` — `Light`, `ShadeMode`, `Background` (starfield + density regions); shading (`ray_color`: ambient + summed per-light diffuse + hard shadows; `atmosphere_glow`; `background`); `hit_world`; `render_view` / `render_scene` (scene → RGBA8, then `apply_post`); `render_material_preview` / `render_background_preview` (neutral-light editor thumbnails, no post).
@@ -92,15 +92,29 @@ eccentric anomaly to an in-plane offset and is reused to draw the elliptical orb
 parent chain at time `t`; `world_at_time(scene, t)` returns a posed snapshot
 (clones each shape with its computed `center`) which is what the raytracer renders.
 `world_at_time` also bakes each sphere's spin orientation (`spin_axis`/`spin_angle`,
-from `Spin` + `t`) into the posed clone.
+from `Spin` + `t`) into the posed clone, plus the time-driven texture state
+(`cloud_angle` for cloud drift, `season_swing` for seasonal polar caps).
 
 **Textures (Phase 9 → Stage 4).** A sphere `Material` with `pattern != 0` carries a
 **3D object-space** procedural texture: layered fbm noise (`noise_scale`,
 `noise_octaves`) optionally blended toward warped latitude bands (`band_strength`,
 `band_freq`, `warp`) for gas giants, mapped through `tex_ramp` (or `albedo`↔`detail`
-when empty). `Sphere::hit` samples it at the **un-spun body-local point** (no pole
-pinch, no seam), so a spinning textured sphere visibly rotates. `surface_field`
-(scalar) / `surface_color` (albedo) are split out and unit-tested.
+when empty). `band_var` wobbles the band phase with latitude so gas-giant stripe
+**widths vary** instead of forming an even comb. `Sphere::hit` samples it at the
+**un-spun body-local point** (no pole pinch, no seam), so a spinning textured sphere
+visibly rotates. `surface_field` (scalar) / `surface_color` (albedo) are split out and
+unit-tested.
+
+**Terrain (rocky planets).** A sphere `Material` may carry a `Terrain` (gated by
+`pattern != 0`, replacing the scalar field→ramp path for the base albedo). It reuses
+the fbm field as **elevation**: below `sea_level` is **ocean** (the `ocean` color,
+darkened toward 0 elevation for depth), above is **land** colored by `tex_ramp`
+sampled by land height (low→high → lowland→mountain). **Polar ice caps** blend toward
+`cap_color` where `|latitude|` exceeds `cap`, with a noise-raggedized rim. The cap edge
+**swings with the seasons**: `cap_season` × sin(time/`season_period`) is baked into the
+sphere's `season_swing` at pose time, so caps slowly grow/shrink while the timeline
+plays. `terrain_color` is split out and unit-tested. Gas giants keep using bands (no
+terrain); the generator gives rocky planets/moons terrain, water worlds vs. dry/desert.
 
 **Clouds.** A sphere `Material` may carry a `Clouds` layer — a *second* translucent
 texture composited over the base surface **at the same hit point** (no extra ray).
@@ -108,8 +122,11 @@ texture composited over the base surface **at the same hit point** (no extra ray
 `coverage`) at the same un-spun body-local point, maps it through the cloud
 `ColorStop` ramp to a color + alpha (empty ramp = white, alpha = field), scales the
 alpha by `opacity`, and alpha-blends it onto the computed albedo. So clouds rotate
-with the planet and get lit like the surface. Per-stop `alpha` on `ColorStop` is the
-shared translucency primitive (also intended for see-through ring gaps).
+with the planet and get lit like the surface. `drift` lets clouds rotate at a slightly
+different rate than the surface (baked as the sphere's `cloud_angle = spin_angle +
+2π·t·drift` at pose time), so the cloud deck slowly slides over the planet while the
+timeline plays. Per-stop `alpha` on `ColorStop` is the shared translucency primitive
+(also intended for see-through ring gaps).
 
 **Lighting (Stage 5).** Lights are gathered at pose time. In the final/`Lit` render,
 each **emissive sphere is a positional light** (color = its albedo, optional
@@ -149,8 +166,10 @@ generated system opens on a moving close-up rather than a static wide shot — l
 background/palette/resolution alone. Real systems are loose inspiration: a central
 emissive **sun** (body 0), then planets on **geometrically growing orbits** (each ≈
 `spacing` × the previous radius, +jitter; Kepler-ish `period ∝ R^1.5`), inner ones small
-& **rocky** (mottled), outer ones likelier **gas giants** (banded texture, sometimes a
-ring + atmosphere). Orbits are near-coplanar (small `inclination` tilt) with optional
+& **rocky** (ocean/land **terrain** — water worlds with blue seas + green land + ice caps,
+or dry/desert worlds — some with seasonal caps), outer ones likelier **gas giants**
+(banded texture with varied stripe widths, sometimes a ring + atmosphere). Moons are
+mottled, some with polar caps. Orbits are near-coplanar (small `inclination` tilt) with optional
 `eccentricity`. **Moons stay bubbled:** a planet's moon orbit is capped at `0.4 ×` the
 *worst-case* clearance to either neighbouring orbit (computed from their perihelion/
 aphelion edges) — strictly less than half the gap — so a moon is always closer to its

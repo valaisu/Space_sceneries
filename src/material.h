@@ -51,7 +51,23 @@ struct Clouds {
     int   octaves = 4;
     float coverage = 0.5f;       // biases the field: <0.5 sparse, >0.5 more cloud
     float opacity = 1.0f;        // overall alpha multiplier
+    float drift = 0.0f;          // extra revolutions/time relative to surface spin (0 = locked)
     std::vector<ColorStop> ramp; // field -> (color, alpha)
+};
+
+// Rocky-planet surface model: an elevation fbm thresholded into ocean vs. land,
+// with seasonal polar ice caps. When enabled it replaces the scalar field->ramp
+// path for the base albedo (gas giants keep using latitude bands instead). Land
+// color comes from the material's `tex_ramp`, sampled by land height (sea_level..1
+// remapped to 0..1) — so deserts/forests/mountains come from the ramp choice.
+struct Terrain {
+    bool  enabled = false;
+    float sea_level = 0.5f;            // elevation threshold: below = ocean
+    Vec3  ocean{0.10f, 0.22f, 0.45f};  // shoreline water (deepens toward 0 elevation)
+    float cap = 0.85f;                 // |latitude| above this -> ice (>=1 = no cap)
+    Vec3  cap_color{0.92f, 0.96f, 1.0f};
+    float cap_season = 0.0f;           // seasonal cap-edge swing amplitude (0 = static)
+    float season_period = 0.0f;        // time for one season cycle (0 = static)
 };
 
 // Phase 1 / 3.4: Minimal material — no PBR, just what the pixel-art shading needs.
@@ -76,9 +92,11 @@ struct Material {
     int   noise_octaves = 4;         // number of fbm layers
     float band_strength = 0.0f;      // 0 = isotropic mottle .. 1 = pure latitude bands
     float band_freq = 6.0f;          // number of latitude bands
+    float band_var = 0.0f;           // unevenness of band widths (0 = uniform stripes)
     float warp = 0.0f;               // domain-warp amount (swirly bands)
     std::vector<ColorStop> tex_ramp; // colors the field maps through
 
+    Terrain terrain;                 // rocky planets: ocean/land + polar caps
     Atmosphere atmosphere;           // Stage 6: faked limb glow
     Clouds clouds;                   // second translucent texture layer (spheres)
 };

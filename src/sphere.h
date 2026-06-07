@@ -13,6 +13,10 @@ public:
     // texture in hit() can be sampled in body-local space and appears to rotate.
     Vec3 spin_axis{0, 1, 0};
     float spin_angle = 0.0f;
+    // Time-driven texture state, also baked at pose time: clouds rotate at
+    // spin_angle + their drift; season_swing oscillates the polar cap edge.
+    float cloud_angle = 0.0f;
+    float season_swing = 0.0f;
 
     Sphere() = default;
     Sphere(Vec3 c, float radius, Material material)
@@ -30,3 +34,8 @@ public:
 // tex_ramp (or albedo<->detail when the ramp is empty). Exposed for testing.
 float surface_field(const Material& m, Vec3 local_unit);
 Vec3 surface_color(const Material& m, float field);
+
+// Rocky terrain albedo at a unit body-local point: ocean below `sea_level`, land
+// (via tex_ramp) above, with seasonal polar ice caps. `season_swing` shifts the
+// cap edge (baked from time in world_at_time). Exposed for testing.
+Vec3 terrain_color(const Material& m, Vec3 local_unit, float season_swing);

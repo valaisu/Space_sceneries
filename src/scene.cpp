@@ -43,9 +43,16 @@ json to_json(const Material& m) {
            {"pattern", m.pattern}, {"detail", to_json(m.detail)},
            {"noise_scale", m.noise_scale}, {"noise_octaves", m.noise_octaves},
            {"band_strength", m.band_strength}, {"band_freq", m.band_freq},
-           {"warp", m.warp}};
+           {"band_var", m.band_var}, {"warp", m.warp}};
     if (!m.ring_ramp.empty()) j["ring_ramp"] = ramp_to_json(m.ring_ramp);
     if (!m.tex_ramp.empty()) j["tex_ramp"] = ramp_to_json(m.tex_ramp);
+    const Terrain& tr = m.terrain;
+    if (tr.enabled)
+        j["terrain"] = json{{"enabled", tr.enabled}, {"sea_level", tr.sea_level},
+                            {"ocean", to_json(tr.ocean)}, {"cap", tr.cap},
+                            {"cap_color", to_json(tr.cap_color)},
+                            {"cap_season", tr.cap_season},
+                            {"season_period", tr.season_period}};
     const Atmosphere& a = m.atmosphere;
     if (a.enabled)
         j["atmosphere"] = json{{"enabled", a.enabled}, {"color", to_json(a.color)},
@@ -55,7 +62,8 @@ json to_json(const Material& m) {
     if (cl.enabled)
         j["clouds"] = json{{"enabled", cl.enabled}, {"scale", cl.scale},
                            {"octaves", cl.octaves}, {"coverage", cl.coverage},
-                           {"opacity", cl.opacity}, {"ramp", ramp_to_json(cl.ramp)}};
+                           {"opacity", cl.opacity}, {"drift", cl.drift},
+                           {"ramp", ramp_to_json(cl.ramp)}};
     return j;
 }
 
@@ -70,9 +78,20 @@ Material material_from_json(const json& j) {
     m.noise_octaves = j.value("noise_octaves", m.noise_octaves);
     m.band_strength = j.value("band_strength", m.band_strength);
     m.band_freq = j.value("band_freq", m.band_freq);
+    m.band_var = j.value("band_var", m.band_var);
     m.warp = j.value("warp", m.warp);
     if (j.contains("ring_ramp")) ramp_from_json(j.at("ring_ramp"), m.ring_ramp);
     if (j.contains("tex_ramp")) ramp_from_json(j.at("tex_ramp"), m.tex_ramp);
+    if (j.contains("terrain")) {
+        const json& t = j.at("terrain");
+        m.terrain.enabled = t.value("enabled", false);
+        m.terrain.sea_level = t.value("sea_level", m.terrain.sea_level);
+        if (t.contains("ocean")) m.terrain.ocean = vec3_from_json(t.at("ocean"));
+        m.terrain.cap = t.value("cap", m.terrain.cap);
+        if (t.contains("cap_color")) m.terrain.cap_color = vec3_from_json(t.at("cap_color"));
+        m.terrain.cap_season = t.value("cap_season", m.terrain.cap_season);
+        m.terrain.season_period = t.value("season_period", m.terrain.season_period);
+    }
     if (j.contains("atmosphere")) {
         const json& a = j.at("atmosphere");
         m.atmosphere.enabled = a.value("enabled", false);
@@ -88,6 +107,7 @@ Material material_from_json(const json& j) {
         m.clouds.octaves = c.value("octaves", m.clouds.octaves);
         m.clouds.coverage = c.value("coverage", m.clouds.coverage);
         m.clouds.opacity = c.value("opacity", m.clouds.opacity);
+        m.clouds.drift = c.value("drift", m.clouds.drift);
         if (c.contains("ramp")) ramp_from_json(c.at("ramp"), m.clouds.ramp);
     }
     return m;
@@ -364,12 +384,29 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
             m.detail = a * rf(0.55f, 0.8f);
             m.band_strength = rf(0.6f, 0.95f);
             m.band_freq = rf(4.0f, 10.0f);
+            m.band_var = rf(0.0f, 1.2f);  // uneven stripe widths
             m.warp = rf(0.1f, 0.6f);
-        } else {  // mottled rocky planet (brown / gray / rust)
-            Vec3 a = Vec3(rf(0.35f, 0.7f), rf(0.3f, 0.55f), rf(0.25f, 0.45f));
-            m.albedo = a;
-            m.detail = a * rf(0.5f, 0.8f);
-            m.band_strength = rf(0.0f, 0.2f);
+        } else {  // rocky planet: ocean/land terrain with seasonal ice caps
+            m.band_strength = 0.0f;       // terrain wants a pure elevation field
+            Terrain& tr = m.terrain;
+            tr.enabled = true;
+            bool watery = u01(rng) < 0.55f;
+            tr.sea_level = watery ? rf(0.42f, 0.6f) : rf(0.0f, 0.2f);  // dry worlds barely flood
+            tr.ocean = watery
+                ? Vec3(rf(0.05f, 0.15f), rf(0.2f, 0.35f), rf(0.45f, 0.65f))   // blue sea
+                : Vec3(rf(0.2f, 0.35f), rf(0.15f, 0.25f), rf(0.1f, 0.2f));    // dark dust basins
+            Vec3 low = watery
+                ? Vec3(rf(0.25f, 0.45f), rf(0.4f, 0.6f), rf(0.2f, 0.35f))     // green lowland
+                : Vec3(rf(0.6f, 0.8f), rf(0.45f, 0.6f), rf(0.3f, 0.45f));     // tan desert
+            Vec3 high = Vec3(rf(0.4f, 0.6f), rf(0.35f, 0.5f), rf(0.3f, 0.45f));  // rocky highland
+            m.tex_ramp = {{0.0f, low}, {1.0f, high}};
+            m.albedo = low;
+            tr.cap = rf(0.7f, 0.95f);
+            tr.cap_color = Vec3(rf(0.88f, 0.97f), rf(0.92f, 0.98f), 1.0f);
+            if (u01(rng) < 0.5f) {  // some worlds breathe seasons
+                tr.cap_season = rf(0.03f, 0.1f);
+                tr.season_period = rf(20.0f, 60.0f);
+            }
         }
         if (p.atmospheres && u01(rng) < 0.45f) {
             m.atmosphere.enabled = true;
@@ -438,6 +475,11 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
             mm.pattern = 2;
             mm.noise_scale = rf(4.0f, 7.0f);
             mm.detail = mm.albedo * 0.6f;
+            if (u01(rng) < 0.4f) {  // some moons wear bright polar caps
+                mm.terrain.enabled = true;
+                mm.terrain.sea_level = 0.0f;  // airless: no ocean, just the mottle + caps
+                mm.terrain.cap = rf(0.78f, 0.92f);
+            }
             auto ms = std::make_shared<Sphere>(Vec3(0, 0, 0), mrad, mm);
             ms->name = bodies[planet_idx[i]].shape->name + " Moon " + std::to_string(k + 1);
             Body mb{ms};
@@ -664,6 +706,13 @@ World world_at_time(const Scene& scene, float t) {
             const Spin& sp = scene.bodies[i].spin;
             s->spin_axis = sp.axis;
             s->spin_angle = (sp.period != 0.0f) ? (TWO_PI * t / sp.period) : 0.0f;
+            // Clouds drift relative to the surface; caps swing with the seasons.
+            const Material& mat = s->material;
+            s->cloud_angle = s->spin_angle + TWO_PI * t * mat.clouds.drift;
+            const Terrain& tr = mat.terrain;
+            s->season_swing = (tr.enabled && tr.season_period != 0.0f)
+                ? tr.cap_season * std::sin(TWO_PI * t / tr.season_period)
+                : 0.0f;
         }
         world.push_back(shape);
     }

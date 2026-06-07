@@ -50,9 +50,37 @@ float surface_field(const Material& m, Vec3 p) {
     if (m.band_strength <= 0.0f) return n;
     // Latitude bands (gas giants): sine of latitude, optionally warped by noise
     // for swirly bands. p is a unit vector, so p.y is the sine of latitude.
-    float warped = p.y + (n - 0.5f) * m.warp;
-    float bands = 0.5f + 0.5f * std::sin(warped * m.band_freq * PI);
+    float lat = p.y + (n - 0.5f) * m.warp;
+    float phase = lat * m.band_freq * PI;
+    // band_var bunches/spreads the stripes with latitude so widths vary (a low-
+    // frequency phase wobble) instead of a perfectly even comb.
+    phase += m.band_var * std::sin(lat * 2.0f * PI);
+    float bands = 0.5f + 0.5f * std::sin(phase);
     return n * (1.0f - m.band_strength) + bands * m.band_strength;
+}
+
+Vec3 terrain_color(const Material& m, Vec3 p, float season_swing) {
+    const Terrain& t = m.terrain;
+    float e = surface_field(m, p);  // elevation [0,1] (fbm; band_strength stays 0)
+    Vec3 base;
+    if (e < t.sea_level) {
+        // Ocean: darken toward 0 elevation so deep water reads deeper than coast.
+        float depth = (t.sea_level > 1e-4f) ? e / t.sea_level : 1.0f;  // 0 deep .. 1 shore
+        base = t.ocean * (0.5f + 0.5f * depth);
+    } else {
+        // Land height remapped to [0,1] and colored by the ramp (low->high).
+        float land = (e - t.sea_level) / std::max(1e-4f, 1.0f - t.sea_level);
+        base = surface_color(m, land);
+    }
+    // Polar ice caps: |p.y| is the sine of latitude. Perturb the test by elevation
+    // noise so the cap rim is ragged, not a clean parallel; season_swing moves it.
+    float edge = t.cap + season_swing;
+    if (edge < 1.0f) {
+        float ragged = std::fabs(p.y) + (e - 0.5f) * 0.15f;
+        float ice = std::clamp((ragged - edge) / 0.08f, 0.0f, 1.0f);
+        base = base * (1.0f - ice) + t.cap_color * ice;
+    }
+    return base;
 }
 
 Vec3 surface_color(const Material& m, float field) {
@@ -89,12 +117,15 @@ bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
     // at the un-spun body-local point (no pole pinch), so it rotates with spin.
     if (material.pattern != 0) {
         Vec3 ln = rotate_about(rec.normal, spin_axis, -spin_angle);
-        rec.material.albedo = surface_color(material, surface_field(material, ln));
+        rec.material.albedo = material.terrain.enabled
+            ? terrain_color(material, ln, season_swing)
+            : surface_color(material, surface_field(material, ln));
     }
     // Cloud layer: a second translucent fbm texture composited over the base.
     if (material.clouds.enabled) {
         const Clouds& cl = material.clouds;
-        Vec3 ln = rotate_about(rec.normal, spin_axis, -spin_angle);
+        // Clouds drift relative to the surface, so use their own baked angle.
+        Vec3 ln = rotate_about(rec.normal, spin_axis, -cloud_angle);
         float f = std::clamp(fbm3(ln * cl.scale, cl.octaves) + (cl.coverage - 0.5f),
                              0.0f, 1.0f);
         float a;
