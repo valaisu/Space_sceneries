@@ -19,6 +19,9 @@ the final image toward deliberate pixel-art color.
   optional Milky-Way-style **galactic band**, and animated **shooting stars**.
 - **Motion** — **Kepler elliptic orbits** (and circles) plus spin, scrubbable on a
   timeline so scenes animate.
+- **Random star systems** — a **Generate** tab builds a whole system (sun, planets,
+  moons, rings) with real-system-inspired spacing, then orbits the camera around a
+  planet; tweak the seed, planet/moon counts, spacing, and tilt.
 - **A pixel-art look** — generated HSV palettes (harmonic schemes — monochromatic,
   complementary, triadic, analogous, or hand-anchored — saveable to a reusable library)
   with dithering, applied identically to the viewport and the exported PNG.

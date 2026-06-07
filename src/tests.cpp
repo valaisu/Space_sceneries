@@ -691,6 +691,42 @@ static void postprocess() {
            back.post.palette_seed == 7);
 }
 
+// The Generate tab's key promise: a moon stays closer to the planet it orbits
+// than to any other planet or the sun, at every point in its orbit.
+static void system_gen() {
+    for (int seed = 1; seed <= 8; ++seed) {
+        SystemGenParams p;
+        p.seed = seed;
+        p.planet_count = 6;
+        p.max_moons = 3;
+        Scene s;
+        generate_system(s, p);
+        assert(s.bodies.size() >= 1 && s.bodies[0].shape->name == "Sun");
+
+        // Indices of the major bodies (sun + planets), i.e. bodies orbiting the sun
+        // plus the sun itself. Moons orbit a planet (parent != 0).
+        std::vector<int> majors;
+        for (int i = 0; i < static_cast<int>(s.bodies.size()); ++i) {
+            const Orbit& o = s.bodies[i].orbit;
+            if (!o.active || o.parent == 0) majors.push_back(i);  // sun or a planet
+        }
+
+        for (float t = 0.0f; t < 40.0f; t += 1.7f) {
+            for (int i = 0; i < static_cast<int>(s.bodies.size()); ++i) {
+                const Orbit& o = s.bodies[i].orbit;
+                if (!o.active || o.parent == 0) continue;  // only moons
+                Vec3 moon = body_world_pos(s, i, t);
+                float d_parent = length(moon - body_world_pos(s, o.parent, t));
+                for (int m : majors) {
+                    if (m == o.parent) continue;
+                    float d = length(moon - body_world_pos(s, m, t));
+                    assert(d > d_parent);  // parent is strictly the closest major body
+                }
+            }
+        }
+    }
+}
+
 int main() {
     phase1();
     phase2();
@@ -708,6 +744,7 @@ int main() {
     lighting();
     atmosphere();
     postprocess();
-    std::printf("Phase 1-3,5,6,7,9,10 + kepler + file io + ring ramp + starfield + texture + lighting + atmosphere + post checks passed.\n");
+    system_gen();
+    std::printf("Phase 1-3,5,6,7,9,10 + kepler + file io + ring ramp + starfield + texture + lighting + atmosphere + post + system-gen checks passed.\n");
     return 0;
 }

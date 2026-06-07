@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <random>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -307,7 +308,172 @@ Vec3 orbit_offset(const Orbit& o, float t) {
     return orbit_offset_at(o, E);
 }
 
+// A unit vector near +Y, tilted by up to `amount` * 18 deg about a random
+// horizontal axis. Used for near-coplanar orbit normals and spin axes.
+Vec3 tilted_up(std::mt19937& rng, float amount) {
+    constexpr float PI = 3.14159265358979323846f;
+    std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+    float ang = amount * (18.0f * PI / 180.0f) * u01(rng);
+    float az = u01(rng) * 2.0f * PI;
+    Vec3 axis(std::cos(az), 0.0f, std::sin(az));  // horizontal tilt axis
+    return normalize(rotate_about(Vec3(0, 1, 0), axis, ang));
+}
+
 }  // namespace
+
+void generate_system(Scene& scene, const SystemGenParams& p) {
+    constexpr float TWO_PI = 6.28318530717958647692f;
+    std::mt19937 rng(static_cast<uint32_t>(p.seed));
+    std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+    auto rf = [&](float a, float b) { return a + (b - a) * u01(rng); };
+    auto ri = [&](int a, int b) { return a + static_cast<int>((b - a + 1) * u01(rng)); };
+
+    const int count = std::max(1, p.planet_count);
+    std::vector<Body> bodies;
+
+    // --- Sun (body 0): the light source ---
+    Material sun_mat{Vec3(1.0f, rf(0.85f, 0.97f), rf(0.45f, 0.7f)), true};
+    auto sun = std::make_shared<Sphere>(Vec3(0, 0, 0), p.sun_radius, sun_mat);
+    sun->name = "Sun";
+    bodies.push_back(Body{sun});
+
+    // --- Planets on geometrically growing orbits (Titius-Bode-ish) ---
+    std::vector<float> orbit_r(count), planet_rad(count), ecc(count), ring_outer(count, 0.0f);
+    std::vector<int> planet_idx(count);
+    std::vector<char> is_gas(count, 0);
+
+    float r = p.sun_radius + rf(3.0f, 4.5f);  // first orbit clears the sun comfortably
+    for (int i = 0; i < count; ++i) {
+        float frac = (count > 1) ? static_cast<float>(i) / (count - 1) : 0.0f;
+        bool gas = u01(rng) < 0.2f + 0.55f * frac;  // gas giants grow likelier outward
+        float prad = gas ? rf(0.7f, 1.3f) : rf(0.25f, 0.6f);
+        orbit_r[i] = r;
+        planet_rad[i] = prad;
+        is_gas[i] = gas ? 1 : 0;
+        ecc[i] = p.eccentricity * u01(rng);
+
+        Material m{};
+        m.pattern = gas ? 1 : 2;
+        m.noise_octaves = 4;
+        m.noise_scale = gas ? rf(2.0f, 3.5f) : rf(3.0f, 5.0f);
+        if (gas) {  // banded two-tone gas giant (tan/orange or blue family)
+            Vec3 a = (u01(rng) < 0.5f)
+                         ? Vec3(rf(0.6f, 0.85f), rf(0.5f, 0.7f), rf(0.3f, 0.45f))
+                         : Vec3(rf(0.3f, 0.5f), rf(0.5f, 0.7f), rf(0.7f, 0.9f));
+            m.albedo = a;
+            m.detail = a * rf(0.55f, 0.8f);
+            m.band_strength = rf(0.6f, 0.95f);
+            m.band_freq = rf(4.0f, 10.0f);
+            m.warp = rf(0.1f, 0.6f);
+        } else {  // mottled rocky planet (brown / gray / rust)
+            Vec3 a = Vec3(rf(0.35f, 0.7f), rf(0.3f, 0.55f), rf(0.25f, 0.45f));
+            m.albedo = a;
+            m.detail = a * rf(0.5f, 0.8f);
+            m.band_strength = rf(0.0f, 0.2f);
+        }
+        if (p.atmospheres && u01(rng) < 0.45f) {
+            m.atmosphere.enabled = true;
+            m.atmosphere.color = Vec3(rf(0.3f, 0.5f), rf(0.5f, 0.7f), rf(0.8f, 1.0f));
+            m.atmosphere.thickness = rf(0.3f, 0.6f);
+            m.atmosphere.intensity = rf(0.6f, 1.3f);
+        }
+
+        auto sph = std::make_shared<Sphere>(Vec3(0, 0, 0), prad, m);
+        sph->name = (gas ? "Gas Giant " : "Planet ") + std::to_string(i + 1);
+        Body b{sph};
+        b.orbit.active = true;
+        b.orbit.parent = 0;  // orbit the sun
+        b.orbit.radius = r;
+        b.orbit.period = std::pow(r, 1.5f) * rf(1.0f, 1.3f);  // Kepler-ish: outer = slower
+        b.orbit.phase = rf(0.0f, TWO_PI);
+        b.orbit.eccentricity = ecc[i];
+        b.orbit.normal = tilted_up(rng, p.inclination);
+        b.spin.axis = tilted_up(rng, 0.4f);
+        b.spin.period = rf(3.0f, 10.0f) * (gas ? 0.6f : 1.0f);
+        planet_idx[i] = static_cast<int>(bodies.size());
+        bodies.push_back(b);
+
+        r *= p.spacing * rf(0.9f, 1.15f);  // next orbit, with a little jitter
+    }
+
+    // --- Rings on some gas giants (added before moons so moons clear the ring) ---
+    for (int i = 0; i < count; ++i) {
+        if (!p.rings || !is_gas[i] || u01(rng) < 0.55f) continue;  // ~45% of gas giants
+        float inner = planet_rad[i] * rf(1.2f, 1.5f);
+        float outer = inner + planet_rad[i] * rf(0.4f, 0.9f);
+        ring_outer[i] = outer;
+        Material rm{Vec3(rf(0.6f, 0.8f), rf(0.55f, 0.7f), rf(0.45f, 0.6f)), false};
+        rm.two_sided = true;  // lit from either face, reads as translucent
+        Vec3 axis = bodies[planet_idx[i]].spin.axis;  // ring sits in the equatorial plane
+        auto disk = std::make_shared<Disk>(Vec3(0, 0, 0), axis, inner, outer, rm);
+        disk->name = bodies[planet_idx[i]].shape->name + " Ring";
+        Body rb{disk};
+        rb.orbit.active = true;
+        rb.orbit.parent = planet_idx[i];  // radius-0 attachment, tracks the planet
+        rb.orbit.radius = 0.0f;
+        rb.orbit.normal = axis;
+        bodies.push_back(rb);
+    }
+
+    // --- Moons, kept in a bubble that never reaches a neighbour or the sun ---
+    // The bubble cap is < half the *worst-case* clearance to either neighbouring
+    // orbit (using their perihelion/aphelion edges), so a moon's distance to its
+    // planet is always less than its distance to any other planet or the sun.
+    for (int i = 0; i < count && p.max_moons > 0; ++i) {
+        float inner_edge = orbit_r[i] * (1.0f - ecc[i]);
+        float outer_edge = orbit_r[i] * (1.0f + ecc[i]);
+        float in_neighbor = (i > 0) ? orbit_r[i - 1] * (1.0f + ecc[i - 1]) : p.sun_radius;
+        float gap_in = inner_edge - in_neighbor;
+        float gap_out = (i < count - 1) ? (orbit_r[i + 1] * (1.0f - ecc[i + 1]) - outer_edge)
+                                        : gap_in;
+        float bubble = 0.4f * std::max(0.0f, std::min(gap_in, gap_out));
+        float prev = std::max(planet_rad[i], ring_outer[i]);  // clear the planet (and ring)
+
+        int nm = ri(0, p.max_moons);
+        for (int k = 0; k < nm; ++k) {
+            float mrad = std::min(planet_rad[i] * 0.4f, rf(0.08f, 0.2f));
+            float mo = prev + mrad + rf(0.3f, 0.7f);  // step outward from the last moon
+            if (mo > bubble) break;                   // would leave the safe bubble
+            Material mm{Vec3(rf(0.45f, 0.7f), rf(0.45f, 0.7f), rf(0.45f, 0.7f)), false};
+            mm.pattern = 2;
+            mm.noise_scale = rf(4.0f, 7.0f);
+            mm.detail = mm.albedo * 0.6f;
+            auto ms = std::make_shared<Sphere>(Vec3(0, 0, 0), mrad, mm);
+            ms->name = bodies[planet_idx[i]].shape->name + " Moon " + std::to_string(k + 1);
+            Body mb{ms};
+            mb.orbit.active = true;
+            mb.orbit.parent = planet_idx[i];
+            mb.orbit.radius = mo;
+            mb.orbit.period = std::pow(mo, 1.5f) * rf(1.5f, 3.0f);
+            mb.orbit.phase = rf(0.0f, TWO_PI);
+            mb.orbit.normal = tilted_up(rng, p.inclination * 0.5f);
+            mb.spin.period = rf(2.0f, 6.0f);
+            bodies.push_back(mb);
+            prev = mo + mrad;
+        }
+    }
+
+    scene.bodies = std::move(bodies);
+
+    // Reframe: orbit a planet (prefer a gas giant) and look at it, so a generated
+    // system opens on a moving close-up of a planet rather than a static wide shot.
+    std::vector<int> giants;
+    for (int i = 0; i < count; ++i)
+        if (is_gas[i]) giants.push_back(i);
+    int fp = giants.empty() ? ri(0, count - 1)
+                            : giants[ri(0, static_cast<int>(giants.size()) - 1)];
+    float fr = planet_rad[fp];
+    scene.cam.orbit.active = true;
+    scene.cam.orbit.parent = planet_idx[fp];  // circle the chosen planet
+    scene.cam.orbit.radius = std::max(fr * 6.0f, ring_outer[fp] + fr * 3.0f);
+    scene.cam.orbit.period = rf(20.0f, 40.0f);
+    scene.cam.orbit.phase = rf(0.0f, TWO_PI);
+    scene.cam.orbit.eccentricity = 0.0f;
+    scene.cam.orbit.normal = normalize(Vec3(rf(-0.3f, 0.3f), 1.0f, rf(-0.3f, 0.3f)));
+    scene.cam.vup = Vec3(0, 1, 0);
+    scene.cam.look = CamLook::Target;
+    scene.cam.target = planet_idx[fp];  // keep that planet framed
+}
 
 std::string scene_to_json(const Scene& scene) {
     json bodies = json::array();
