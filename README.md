@@ -19,8 +19,9 @@ the final image toward deliberate pixel-art color.
   optional Milky-Way-style **galactic band**, and animated **shooting stars**.
 - **Motion** — **Kepler elliptic orbits** (and circles) plus spin, scrubbable on a
   timeline so scenes animate.
-- **A pixel-art look** — generated HSV palettes (saveable to a reusable library) with
-  dithering, applied identically to the viewport and the exported PNG.
+- **A pixel-art look** — generated HSV palettes (harmonic schemes — monochromatic,
+  complementary, triadic, analogous, or hand-anchored — saveable to a reusable library)
+  with dithering, applied identically to the viewport and the exported PNG.
 
 ## Build & run
 

@@ -177,9 +177,12 @@ json to_json(const PostProcess& p) {
     for (const auto& c : p.palette) pal.push_back(to_json(c));
     return json{{"enabled", p.enabled}, {"palette", pal},
                 {"base_a", to_json(p.base_a)}, {"base_b", to_json(p.base_b)},
+                {"base_c", to_json(p.base_c)},
                 {"palette_size", p.palette_size}, {"blur_radius", p.blur_radius},
                 {"dither", static_cast<int>(p.dither)}, {"iterations", p.iterations},
+                {"scheme", p.scheme},
                 {"anchor_count", p.anchor_count}, {"base_hue", p.base_hue},
+                {"spread", p.spread},
                 {"randomness", p.randomness}, {"palette_seed", p.palette_seed}};
 }
 
@@ -192,12 +195,15 @@ PostProcess post_from_json(const json& j) {
     }
     if (j.contains("base_a")) p.base_a = vec3_from_json(j.at("base_a"));
     if (j.contains("base_b")) p.base_b = vec3_from_json(j.at("base_b"));
+    if (j.contains("base_c")) p.base_c = vec3_from_json(j.at("base_c"));
     p.palette_size = j.value("palette_size", p.palette_size);
     p.blur_radius = j.value("blur_radius", p.blur_radius);
     p.dither = static_cast<DitherMode>(j.value("dither", static_cast<int>(p.dither)));
     p.iterations = j.value("iterations", p.iterations);
+    p.scheme = j.value("scheme", p.scheme);
     p.anchor_count = j.value("anchor_count", p.anchor_count);
     p.base_hue = j.value("base_hue", p.base_hue);
+    p.spread = j.value("spread", p.spread);
     p.randomness = j.value("randomness", p.randomness);
     p.palette_seed = j.value("palette_seed", p.palette_seed);
     return p;
