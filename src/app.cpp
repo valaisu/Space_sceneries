@@ -164,6 +164,9 @@ struct Editor {
     GLuint mat_tex = 0, bg_tex = 0;
     std::vector<uint32_t> mat_px, bg_px;
 
+    // Random star-system generator controls (the Generate tab).
+    SystemGenParams gen;
+
     // Active modal transform + the snapshot taken when it began (for cancel).
     XMode xmode = XMode::None;
     ImVec2 x_start_mouse{0, 0};
@@ -278,6 +281,42 @@ void draw_orbit(ImDrawList* dl, const ScreenMap& map, const Scene& scene, int i,
     }
     if (n >= 2)
         dl->AddPolyline(pts, n, col, any_behind ? 0 : ImDrawFlags_Closed, 1.5f);
+}
+
+// Distance in screen pixels from point p to segment ab.
+float dist_to_segment(ImVec2 p, ImVec2 a, ImVec2 b) {
+    ImVec2 ab(b.x - a.x, b.y - a.y);
+    float len2 = ab.x * ab.x + ab.y * ab.y;
+    float u = (len2 > 0.0f) ? ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / len2 : 0.0f;
+    u = std::clamp(u, 0.0f, 1.0f);
+    return std::hypot(p.x - (a.x + ab.x * u), p.y - (a.y + ab.y * u));
+}
+
+// Nearest body whose drawn orbit passes within `thresh` px of the cursor, else -1.
+// Mirrors draw_orbit's sampling so the clickable path matches what's on screen.
+int pick_orbit(const Scene& scene, const ScreenMap& map, float time, ImVec2 m, float thresh) {
+    int best = -1;
+    float best_d = thresh;
+    for (int i = 0; i < static_cast<int>(scene.bodies.size()); ++i) {
+        if (!scene.bodies[i].orbit.active) continue;
+        constexpr int N = 64;
+        ImVec2 prev;
+        bool have_prev = false;
+        for (int k = 0; k <= N; ++k) {  // <= N closes the loop back to angle 0
+            ImVec2 pt;
+            if (!map.to_screen(orbit_ring_point(scene, i, time, (2.0f * PI * (k % N)) / N), pt)) {
+                have_prev = false;
+                continue;
+            }
+            if (have_prev) {
+                float d = dist_to_segment(m, prev, pt);
+                if (d < best_d) { best_d = d; best = i; }
+            }
+            prev = pt;
+            have_prev = true;
+        }
+    }
+    return best;
 }
 
 void draw_selection_outline(ImDrawList* dl, const ScreenMap& map,
@@ -714,10 +753,51 @@ void draw_stylize_tab(Editor& ed) {
     ImGui::SliderInt("Iterations", &pp.iterations, 1, 4);
 }
 
+void force_redraw(Editor& ed);  // defined below; menu/generate actions need it
+
+// Build a fresh random system from the current params, replacing all bodies.
+// Recoverable via Undo. Clears the selection and forces a viewport refresh.
+void do_generate(Editor& ed) {
+    generate_system(ed.scene, ed.gen);
+    ed.selected = SEL_NONE;
+    force_redraw(ed);
+}
+
+// Generate tab: knobs for the procedural star-system generator.
+void draw_generate_tab(Editor& ed) {
+    SystemGenParams& g = ed.gen;
+    ImGui::TextWrapped("Build a random star system. Replaces all current objects "
+                       "(Ctrl+Z to undo).");
+
+    ImGui::SeparatorText("System");
+    ImGui::InputInt("Seed", &g.seed);
+    ImGui::SliderInt("Planets", &g.planet_count, 1, 8);
+    ImGui::SliderInt("Max moons / planet", &g.max_moons, 0, 4);
+    drag_scale("Sun radius", &g.sun_radius, 0.3f, 6.0f);
+
+    ImGui::SeparatorText("Orbits");
+    // Below ~1.35 the perihelion/aphelion edges of neighbouring orbits can meet, so
+    // the bubble math (and visual spacing) breaks down — keep planets well apart.
+    ImGui::SliderFloat("Spacing", &g.spacing, 1.35f, 2.2f);
+    ImGui::SetItemTooltip("Orbit growth factor: higher = planets farther apart.");
+    ImGui::SliderFloat("Inclination", &g.inclination, 0.0f, 1.0f);
+    ImGui::SliderFloat("Eccentricity", &g.eccentricity, 0.0f, 0.25f);
+
+    ImGui::SeparatorText("Features");
+    ImGui::Checkbox("Rings on gas giants", &g.rings);
+    ImGui::Checkbox("Atmospheres", &g.atmospheres);
+
+    ImGui::Separator();
+    if (ImGui::Button("Generate system")) do_generate(ed);
+    ImGui::SameLine();
+    if (ImGui::Button("Randomize")) { g.seed++; do_generate(ed); }
+}
+
 void draw_properties(Editor& ed) {
     ImGui::Begin("Properties", nullptr, PANEL_FLAGS);
     if (ImGui::BeginTabBar("PropTabs")) {
         if (ImGui::BeginTabItem("Object")) { draw_object_tab(ed); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Generate")) { draw_generate_tab(ed); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("World")) { draw_world_tab(ed); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Stylize")) { draw_stylize_tab(ed); ImGui::EndTabItem(); }
         ImGui::EndTabBar();
@@ -1200,6 +1280,11 @@ void draw_viewport(Editor& ed) {
         float s = (m.x - img_pos.x) / region_w;
         float t = 1.0f - (m.y - img_pos.y) / region_h;
         int picked = pick_body(ed, cam.get_ray(s, t));
+        // Fall back to clicking a body's orbit path (only when one is drawn).
+        if (picked < 0 && ed.show_orbits && !ed.look_through_camera) {
+            int o = pick_orbit(ed.scene, map, ed.time, m, 8.0f);
+            if (o >= 0) picked = o;
+        }
         ImVec2 cscr;  // the camera isn't geometry — pick it near its gizmo
         if (!ed.look_through_camera &&
             camera_screen_pos(map, ed.scene, ed.time, cscr) &&

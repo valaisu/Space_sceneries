@@ -54,6 +54,29 @@ struct Scene {
     float aspect_ratio() const { return static_cast<float>(width) / static_cast<float>(height); }
 };
 
+// Procedural star-system generator (the editor's "Generate" tab). Controls for
+// how a random system is built; tuned so that, by default, bodies sit well apart
+// — a planet's moons stay in a small bubble that never reaches a neighbouring
+// planet or the sun, so a moon is always closest to the planet it orbits.
+// Real systems are loose inspiration (geometric orbit spacing, inner rocky /
+// outer gas giants, near-coplanar orbits) but distances are kept practical.
+struct SystemGenParams {
+    int   seed = 1;
+    int   planet_count = 5;     // number of planets around the sun
+    int   max_moons = 2;        // up to this many moons per planet (0 = none)
+    float spacing = 1.6f;       // orbit growth factor between successive planets
+    float sun_radius = 1.5f;
+    float inclination = 0.2f;   // 0 = coplanar .. 1 = strongly tilted orbits
+    float eccentricity = 0.1f;  // 0 = circular .. this is the per-orbit max
+    bool  rings = true;         // allow rings on some gas giants
+    bool  atmospheres = true;   // allow atmospheric glow on some planets
+};
+
+// Replace `scene.bodies` with a freshly generated system (sun at body 0, then
+// planets, then their moons/rings) and reframe `scene.cam` to fit. Leaves the
+// background, palette and output resolution untouched.
+void generate_system(Scene& scene, const SystemGenParams& p);
+
 // Phase 3 / 5.2: JSON round-trip. Returns/accepts a pretty-printed JSON string.
 std::string scene_to_json(const Scene& scene);
 Scene scene_from_json(const std::string& text);

@@ -49,7 +49,7 @@ Core math / geometry (header-only unless noted):
 - `motion.h` — `Orbit`, `Spin`, `Body` (a shape + its motion).
 - `render.h` / `render.cpp` — `Light`, `ShadeMode`, `Background` (starfield + density regions); shading (`ray_color`: ambient + summed per-light diffuse + hard shadows; `atmosphere_glow`; `background`); `hit_world`; `render_view` / `render_scene` (scene → RGBA8, then `apply_post`); `render_material_preview` / `render_background_preview` (neutral-light editor thumbnails, no post).
 - `post.h` / `post.cpp` — `PostProcess`, `DitherMode`; `generate_palette` (HSV harmonic palettes; a `scheme` selector — `Anchors` line (0/1/2/3 anchor colors + `spread` hue-fan) or rule-based `Monochromatic`/`Complementary`/`Triadic`/`Analogous` ramped dark→light — plus a `base_hue` rotation + seeded `randomness`) + `apply_post` (blur → quantize/dither over the RGBA8 buffer). In `core`, no UI deps.
-- `scene.h` / `scene.cpp` — `Scene`, `SceneCamera` (+ `CamLook`), JSON save/load, and posing (`body_world_pos`, `world_at_time`, `orbit_ring_point`, `camera_eye`, `scene_camera`).
+- `scene.h` / `scene.cpp` — `Scene`, `SceneCamera` (+ `CamLook`), JSON save/load, posing (`body_world_pos`, `world_at_time`, `orbit_ring_point`, `camera_eye`, `scene_camera`), and the **random system generator** (`SystemGenParams` + `generate_system`).
 
 Executables:
 - `app.cpp` — the editor (ImGui + GLFW + OpenGL). **GUI-only.**
@@ -142,6 +142,22 @@ the timeline plays (this is why `background`/`ray_color` take a `time` arg; prev
 term (bright at the silhouette), gated to the sun-lit side and tinted toward `sunset`
 near the terminator. Purely additive — **no transparency, no second ray.**
 
+**System generation.** `generate_system(scene, SystemGenParams)` (in `core`/scene.cpp)
+replaces `scene.bodies` with a random system and reframes `scene.cam` — it sets the
+render camera to **orbit a planet** (preferring a gas giant) and `Target`-track it, so a
+generated system opens on a moving close-up rather than a static wide shot — leaving
+background/palette/resolution alone. Real systems are loose inspiration: a central
+emissive **sun** (body 0), then planets on **geometrically growing orbits** (each ≈
+`spacing` × the previous radius, +jitter; Kepler-ish `period ∝ R^1.5`), inner ones small
+& **rocky** (mottled), outer ones likelier **gas giants** (banded texture, sometimes a
+ring + atmosphere). Orbits are near-coplanar (small `inclination` tilt) with optional
+`eccentricity`. **Moons stay bubbled:** a planet's moon orbit is capped at `0.4 ×` the
+*worst-case* clearance to either neighbouring orbit (computed from their perihelion/
+aphelion edges) — strictly less than half the gap — so a moon is always closer to its
+parent than to any other planet or the sun. That invariant is unit-tested (`system_gen`
+in tests.cpp). Moons also start outside the planet's radius and any ring. Params aren't
+serialized (they're transient authoring controls held by the editor, not the `Scene`).
+
 **Rendering & post (Stage 3).** `render_view` shoots one primary ray per pixel, shades
 the nearest hit, composites stars on misses, then runs `apply_post`. Its per-pixel
 loop is **OpenMP-parallel over rows** (`#pragma omp parallel for`; read-only over the
@@ -172,7 +188,7 @@ under camera/body motion — deliberately not solved yet; a coherent amount of s
 is considered on-style.)
 
 **Editor (`app.cpp`).** Blender-style single-viewport layout: top menu bar +
-central viewport + **tabbed** Properties panel (right: **Object / World / Stylize**) +
+central viewport + **tabbed** Properties panel (right: **Object / Generate / World / Stylize**) +
 Timeline strip (bottom).
 The viewport **coarsely raytraces** a navigable *edit* camera — a
 distinct concept from the scene's *render* camera (the `OrbitCam` is a yaw/pitch/
@@ -182,8 +198,10 @@ no separate `G` key), **right-drag orbits** the view, wheel or **`+`/`-`** zoom,
 **`X`/`Y`/`Z`** align the view down a world axis, **`C`** recenters the pivot on the
 scene origin, **`0`** toggles look-through-camera, and **`Delete`** removes the
 selection. There's no panning. Selecting
-an object (left-click ray-pick, or click the render camera's frustum gizmo →
-`selected == SEL_CAMERA == -2`) recenters the edit-camera pivot on it. Overlays
+an object (left-click ray-pick, **or click its drawn orbit path** when the ray misses —
+`pick_orbit` hit-tests the cursor against the projected orbit polylines — or click the
+render camera's frustum gizmo → `selected == SEL_CAMERA == -2`) recenters the edit-camera
+pivot on it. Overlays
 (ImGui draw list via `Camera::project`): an orange outline + orbit path on the
 selection, the render-camera frustum gizmo, a scene-origin marker ("O") and a
 view-pivot crosshair, and a corner **X/Y/Z axis gizmo**. Orbit paths are an edit-view
@@ -207,8 +225,11 @@ sky preview); **Stylize** holds the palette post-process (incl. the `base_hue` s
 **palette library** that saves/loads `palettes/*.json`); **Object** shows the selected body — a
 sphere's material/texture, **clouds** layer, and atmosphere (with a neutral-light
 material preview), or a ring's color ramp. Color-ramp rows expose a per-stop **alpha**
-slider. The `render_material_preview` / `render_background_preview` thumbnails live in
-`core` (neutral lighting, no post-process) so the texture/sky read true.
+slider. The **Generate** tab drives the random system generator (see below):
+seed/planet-count/moons/spacing/inclination/eccentricity knobs + rings/atmosphere
+toggles, with **Generate** / **Randomize** buttons that replace all bodies (Undo
+recovers the prior scene). The `render_material_preview` / `render_background_preview`
+thumbnails live in `core` (neutral lighting, no post-process) so the texture/sky read true.
 
 ## Conventions & gotchas
 
