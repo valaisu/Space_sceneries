@@ -51,7 +51,35 @@ struct Clouds {
     int   octaves = 4;
     float coverage = 0.5f;       // biases the field: <0.5 sparse, >0.5 more cloud
     float opacity = 1.0f;        // overall alpha multiplier
+    float drift = 0.0f;          // extra revolutions/time relative to surface spin (0 = locked)
     std::vector<ColorStop> ramp; // field -> (color, alpha)
+};
+
+// Impact craters for airless rocky bodies: cellular (Worley) bowls scattered over
+// the surface — darker floor, bright raised rim — multiplied onto the base albedo.
+// No extra ray; sampled at the same un-spun body-local point as the surface texture.
+struct Craters {
+    bool  enabled = false;
+    float density = 4.0f;   // cell frequency: higher = more, smaller craters
+    float strength = 0.5f;  // contrast of floor-darkening / rim-brightening
+    int   seed = 0;
+};
+
+// Rocky-planet surface model: an elevation fbm thresholded into ocean vs. land,
+// with seasonal polar ice caps. When enabled it replaces the scalar field->ramp
+// path for the base albedo (gas giants keep using latitude bands instead). Land
+// color comes from the material's `tex_ramp`, sampled by land height (sea_level..1
+// remapped to 0..1) — so deserts/forests/mountains come from the ramp choice.
+struct Terrain {
+    bool  enabled = false;
+    float sea_level = 0.5f;            // elevation threshold: below = ocean
+    Vec3  ocean{0.10f, 0.22f, 0.45f};  // shoreline water (deepens toward 0 elevation)
+    int   levels = 0;                  // 0 = smooth gradient; >1 = posterize land into
+                                       // that many flat bands with crisp boundaries
+    float cap = 0.85f;                 // |latitude| above this -> ice (>=1 = no cap)
+    Vec3  cap_color{0.92f, 0.96f, 1.0f};
+    float cap_season = 0.0f;           // seasonal cap-edge swing amplitude (0 = static)
+    float season_period = 0.0f;        // time for one season cycle (0 = static)
 };
 
 // Phase 1 / 3.4: Minimal material — no PBR, just what the pixel-art shading needs.
@@ -76,9 +104,21 @@ struct Material {
     int   noise_octaves = 4;         // number of fbm layers
     float band_strength = 0.0f;      // 0 = isotropic mottle .. 1 = pure latitude bands
     float band_freq = 6.0f;          // number of latitude bands
+    float band_var = 0.0f;           // unevenness of band widths (0 = uniform stripes)
     float warp = 0.0f;               // domain-warp amount (swirly bands)
+    int   band_levels = 0;           // 0/1 = smooth bands; >1 = posterize into flat belts
+    float turbulence = 0.0f;         // intra-belt zonal filament texture (0 = none)
+    float band_drift = 0.0f;         // gas-giant band-layer drift (extra revs/time; 0 = locked to spin)
     std::vector<ColorStop> tex_ramp; // colors the field maps through
 
+    // Gas-giant storms: a few oval vortices (a guaranteed "great red spot" plus
+    // hash-placed smaller ovals), elongated east-west, blended toward storm_color.
+    float storm = 0.0f;              // overall storm strength/coverage (0 = none)
+    int   storm_seed = 0;            // placement seed
+    Vec3  storm_color{0.75f, 0.3f, 0.2f};
+
+    Terrain terrain;                 // rocky planets: ocean/land + polar caps
+    Craters craters;                 // airless rocky bodies: impact-crater bowls
     Atmosphere atmosphere;           // Stage 6: faked limb glow
     Clouds clouds;                   // second translucent texture layer (spheres)
 };

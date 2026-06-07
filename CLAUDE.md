@@ -42,9 +42,9 @@ build, configure a separate tree explicitly: `-DCMAKE_BUILD_TYPE=Debug` (slower)
 Core math / geometry (header-only unless noted):
 - `vec3.h` — `Vec3` + dot/cross/normalize/length + `rotate_about` (Rodrigues).
 - `ray.h` — `Ray`.
-- `material.h` — `Material` (albedo + emissive + `two_sided` + 3D procedural texture fields + ring/tex `ColorStop` ramps + `Atmosphere` + `Clouds`), `ColorStop` (carries per-stop `alpha`) + `sample_color_ramp` (optional alpha out-param), `Atmosphere`, `Clouds`.
+- `material.h` — `Material` (albedo + emissive + `two_sided` + 3D procedural texture fields incl. `band_var` + `band_drift` + ring/tex `ColorStop` ramps + `Terrain` + `Craters` + `Atmosphere` + `Clouds`), `ColorStop` (carries per-stop `alpha`) + `sample_color_ramp` (optional alpha out-param), `Terrain` (rocky ocean/land + seasonal polar caps), `Craters` (cellular impact bowls for airless bodies), `Atmosphere`, `Clouds` (incl. `drift`).
 - `hittable.h` — `Hittable` base (virtual `hit` + `clone`, plus `center` and `name`), `HitRecord`.
-- `sphere.h` / `sphere.cpp`, `disk.h` / `disk.cpp` — the two primitives + ray intersection. `sphere.cpp` also has `surface_field`/`surface_color` (3D object-space texture) and composites the translucent **cloud layer** over the base surface; `disk.cpp` samples the radial ring ramp.
+- `sphere.h` / `sphere.cpp`, `disk.h` / `disk.cpp` — the two primitives + ray intersection. `sphere.cpp` also has `surface_field`/`surface_color` (3D object-space texture), `terrain_color` (rocky ocean/land + caps), `crater_shade` (cellular impact bowls), and composites the translucent **cloud layer** over the base surface; `disk.cpp` samples the radial ring ramp.
 - `camera.h` — LookAt `Camera`: `get_ray` (rays), `project` (world→screen, the exact inverse, used for overlays), and `right`/`up`/`forward` basis accessors (used by viewport transforms).
 - `motion.h` — `Orbit`, `Spin`, `Body` (a shape + its motion).
 - `render.h` / `render.cpp` — `Light`, `ShadeMode`, `Background` (starfield + density regions); shading (`ray_color`: ambient + summed per-light diffuse + hard shadows; `atmosphere_glow`; `background`); `hit_world`; `render_view` / `render_scene` (scene → RGBA8, then `apply_post`); `render_material_preview` / `render_background_preview` (neutral-light editor thumbnails, no post).
@@ -92,15 +92,52 @@ eccentric anomaly to an in-plane offset and is reused to draw the elliptical orb
 parent chain at time `t`; `world_at_time(scene, t)` returns a posed snapshot
 (clones each shape with its computed `center`) which is what the raytracer renders.
 `world_at_time` also bakes each sphere's spin orientation (`spin_axis`/`spin_angle`,
-from `Spin` + `t`) into the posed clone.
+from `Spin` + `t`) into the posed clone, plus the time-driven texture state
+(`cloud_angle` for cloud drift, `season_swing` for seasonal polar caps).
 
 **Textures (Phase 9 → Stage 4).** A sphere `Material` with `pattern != 0` carries a
 **3D object-space** procedural texture: layered fbm noise (`noise_scale`,
 `noise_octaves`) optionally blended toward warped latitude bands (`band_strength`,
 `band_freq`, `warp`) for gas giants, mapped through `tex_ramp` (or `albedo`↔`detail`
-when empty). `Sphere::hit` samples it at the **un-spun body-local point** (no pole
-pinch, no seam), so a spinning textured sphere visibly rotates. `surface_field`
-(scalar) / `surface_color` (albedo) are split out and unit-tested.
+when empty). `band_var` wobbles the band phase with latitude so gas-giant stripe
+**widths vary** instead of forming an even comb. `Sphere::hit` samples it at the
+**un-spun body-local point** (no pole pinch, no seam), so a spinning textured sphere
+visibly rotates. `surface_field` (scalar) / `surface_color` (albedo) are split out and
+unit-tested.
+
+**Gas-giant belts & storms.** To avoid wavy "mush" giants, the band path builds a
+discrete-belt structure instead of a symmetric sine (which alternated two ramp ends):
+it makes a **belt coordinate** from latitude, where `band_var` distorts the
+latitude→belt spacing so belt **widths vary** (steeper local slope = narrower belt);
+`floor` of that coordinate is the **belt index**, and each belt samples its **own
+position along `tex_ramp`** via a per-belt `hash11`, so consecutive belts are distinct
+colors drawn from the whole ramp ("the line") rather than an A/B/A/B alternation.
+`band_levels` (>1) snaps belts to that many distinct ramp positions (0 = each belt
+anywhere on the line). `turbulence` adds high-freq fbm **stretched east–west** (latitude
+compressed ×3) to the belt coordinate, wiggling the **belt boundaries** into filaments;
+a small `n` noise term survives at high `band_strength` for interior texture. `storm`
+(>0) overlays a few **oval vortices** via `storm_weight` (declared in sphere.h,
+unit-tested): a guaranteed primary "great red spot" plus hash-placed (`storm_seed`)
+smaller ovals that appear as `storm`→1, each elongated east–west, blended toward
+`storm_color` in `Sphere::hit` after the band albedo. The generator gives gas giants
+high `band_strength`, varied `band_var` widths, `turbulence`, calmer `warp`, usually a
+3-stop ramp (the line), free belt colors (`band_levels` mostly 0), and storms on ~1/3
+(the primary "great red spot" is enlarged and mid-latitude so it reads clearly).
+
+**Terrain (rocky planets).** A sphere `Material` may carry a `Terrain` (gated by
+`pattern != 0`, replacing the scalar field→ramp path for the base albedo). It reuses
+the fbm field as **elevation**: below `sea_level` is **ocean** (the `ocean` color,
+darkened toward 0 elevation for depth), above is **land** colored by `tex_ramp`
+sampled by land height (low→high → lowland→mountain). `levels` **posterizes** the land
+(and ocean depth) into that many flat steps, so colored regions get **crisp boundaries**
+instead of a smooth gradient (0 = smooth); the generator pairs `levels=3` with a 3-color
+biome ramp so each band is a distinct region — the fix for "uniform mush" planets.
+**Polar ice caps** blend toward
+`cap_color` where `|latitude|` exceeds `cap`, with a noise-raggedized rim. The cap edge
+**swings with the seasons**: `cap_season` × sin(time/`season_period`) is baked into the
+sphere's `season_swing` at pose time, so caps slowly grow/shrink while the timeline
+plays. `terrain_color` is split out and unit-tested. Gas giants keep using bands (no
+terrain); the generator gives rocky planets/moons terrain, water worlds vs. dry/desert.
 
 **Clouds.** A sphere `Material` may carry a `Clouds` layer — a *second* translucent
 texture composited over the base surface **at the same hit point** (no extra ray).
@@ -108,8 +145,28 @@ texture composited over the base surface **at the same hit point** (no extra ray
 `coverage`) at the same un-spun body-local point, maps it through the cloud
 `ColorStop` ramp to a color + alpha (empty ramp = white, alpha = field), scales the
 alpha by `opacity`, and alpha-blends it onto the computed albedo. So clouds rotate
-with the planet and get lit like the surface. Per-stop `alpha` on `ColorStop` is the
-shared translucency primitive (also intended for see-through ring gaps).
+with the planet and get lit like the surface. `drift` lets clouds rotate at a slightly
+different rate than the surface (baked as the sphere's `cloud_angle = spin_angle +
+2π·t·drift` at pose time), so the cloud deck slowly slides over the planet while the
+timeline plays. Per-stop `alpha` on `ColorStop` is the shared translucency primitive
+(also intended for see-through ring gaps).
+
+**Craters.** A sphere `Material` may carry a `Craters` layer (airless rocky bodies). In
+`Sphere::hit`, `crater_shade` evaluates **cellular (Worley) noise** at the same un-spun
+body-local point: over the 3×3×3 cell neighbourhood it finds the nearest jittered feature
+point that holds a crater (`density` sets cell frequency, ~45% of cells are empty), and
+inside that crater's radius shades a **bowl** — a darkened floor with a thin bright raised
+**rim** — returning a multiplier (~0.2–1.4) applied to the base albedo. Unit-tested
+(`crater_shade`: 1 when disabled, floors <1 when enabled). The generator gives airless
+rocky planets + every moon craters (gated by `crater_chance`); worlds with an atmosphere
+keep a smooth surface.
+
+**Band drift.** A gas giant's `band_drift` (revs/time) bakes a `band_angle = spin_angle +
+2π·t·band_drift` at pose time (mirroring cloud drift). `Sphere::hit` samples the band path
+(`surface_field` + `storm_weight`) at that drifting angle instead of the plain spin angle,
+so belts, zonal filaments and storms slowly **slide** while the surface still spins — cheap
+(one extra `rotate_about` per gas-giant pixel, skipped when `band_drift == 0`). Terrain
+(rocky) bodies are unaffected.
 
 **Lighting (Stage 5).** Lights are gathered at pose time. In the final/`Lit` render,
 each **emissive sphere is a positional light** (color = its albedo, optional
@@ -144,19 +201,39 @@ near the terminator. Purely additive — **no transparency, no second ray.**
 
 **System generation.** `generate_system(scene, SystemGenParams)` (in `core`/scene.cpp)
 replaces `scene.bodies` with a random system and reframes `scene.cam` — it sets the
-render camera to **orbit a planet** (preferring a gas giant) and `Target`-track it, so a
+render camera to **orbit a planet** and `Target`-track it (which planet is picked by
+`hero_kind`: 0 prefers a gas giant — the default — 1 a rocky/terrain world, 2 forces a
+gas giant; falls back to any planet), so a
 generated system opens on a moving close-up rather than a static wide shot — leaving
 background/palette/resolution alone. Real systems are loose inspiration: a central
 emissive **sun** (body 0), then planets on **geometrically growing orbits** (each ≈
 `spacing` × the previous radius, +jitter; Kepler-ish `period ∝ R^1.5`), inner ones small
-& **rocky** (mottled), outer ones likelier **gas giants** (banded texture, sometimes a
-ring + atmosphere). Orbits are near-coplanar (small `inclination` tilt) with optional
+& **rocky** (ocean/land **terrain** — water worlds with blue seas + green land, or
+dry/desert worlds; a **3-color biome ramp posterized into flat bands** so regions read
+crisply; ice caps vary from none through small to a frozen world, sometimes seasonal,
+with **varied cap tints** (white-blue / warm dust / pale cyan / alien); **airless** rocky
+worlds (no atmosphere) get **impact craters**; some get **drifting clouds**, not always
+white; ~30% are **exotic**, an HSV hue family
+shifted off Earth-like greens/blues), outer ones likelier **gas giants**
+(discrete belts of varied widths, each a distinct color sampled along the ramp, with
+zonal filaments + slowly **drifting bands** (`band_drift`) + ~1/3 an oval storm, sometimes
+a ring — now a **multi-band radial color ramp** (`ring_colors`) — + atmosphere). The sun
+itself sometimes gets **faint granulation/banding** (`sun_texture_chance`). The overall
+rocky↔gas split is set by `gas_ratio` (a mild outward tilt keeps inner planets rockier).
+Moons are mottled + cratered, some with polar caps. Every planet **spins** (period 3–10s) about a
+**randomly tilted axis** (small, ~up to 22°), with a rare **~8% Uranus-like extreme tilt
+(~90°, spins on its side)** — and an extreme-tilt world **drops its polar caps** (the poles
+no longer face away from the sun). Orbits are near-coplanar (small `inclination` tilt) with optional
 `eccentricity`. **Moons stay bubbled:** a planet's moon orbit is capped at `0.4 ×` the
 *worst-case* clearance to either neighbouring orbit (computed from their perihelion/
 aphelion edges) — strictly less than half the gap — so a moon is always closer to its
 parent than to any other planet or the sun. That invariant is unit-tested (`system_gen`
-in tests.cpp). Moons also start outside the planet's radius and any ring. Params aren't
-serialized (they're transient authoring controls held by the editor, not the `Scene`).
+in tests.cpp). Moons also start outside the planet's radius and any ring. The gen
+params (`SystemGenParams`) are editor authoring controls, not part of `Scene`, but they
+**are** persisted: save/"Set as default" writes them (plus the eclipse-loop knobs and a few
+view prefs) under the scene JSON's optional **`editor`** section via the `EditorSettings`
+overloads of `scene_to_json`/`save_scene`/`load_scene` (older files lacking the section fall
+back to defaults). The editor packs/unpacks `EditorSettings` around save/load (`app.cpp`).
 
 **Infinite eclipse loop.** `generate_eclipse_system(scene, SystemGenParams, scene_seconds,
 cam_loops)` (scene.cpp) builds a normal system via `generate_system` — with the params
@@ -171,7 +248,19 @@ apparent motion speed is constant across scenes regardless of orbit sizes): the 
 makes `cam_loops` revolutions per cycle (`period = T/cam_loops`) and the planet does
 `cam_loops-1` orbits (`period = T/(cam_loops-1)`), so camera & anti-sun realign **exactly
 once per cycle** (one eclipse), with a full reveal at mid-cycle. `cam_loops == 1` parks the
-planet (`(0,0,-R)`, orbit off) for the calmest, pure-camera sweep. Because the camera
+planet (`(0,0,-R)`, orbit off) for the calmest, pure-camera sweep. The **close-up hero is a
+random type each cycle** (`hero_kind` chosen 50/50: rocky/ocean world vs gas giant), so the
+loop showcases terrain + caps + a backlit-atmosphere crescent on some cycles and a banded
+giant on others, with no predictable A-B-A-B pattern. Moons aren't eligible heroes — the
+eclipse frame needs a **sun-orbiting** hero (`R` = its solar orbit). **Every *other*
+sun-orbiting planet is hidden at the cut:** it's forced coplanar (`normal=+Y`, `phase=0`)
+and re-timed to an **integer number of orbits per cycle**, so at `t=0` (and again at `t=T`)
+it sits on the `+Z` axis directly **behind the hero** — out of frame at the eclipse — then
+swings briefly into view off to the side mid-cycle; each is also shrunk `0.7×` so it never
+reads as large as the sun (the "stray planet next to the sun" complaint). Two more loop-only
+tweaks keep the vibe calm: the spacing floor is raised (neighbours sit farther apart in
+frame) and **every moon is re-timed to ≥ one cycle per orbit** (`generate_system`'s short
+Keplerian moon periods otherwise whir around many times per scene). Because the camera
 orientation + FOV are identical every eclipse and the starfield is hashed by ray
 *direction* only, the cut is **seamless** (no star/framing jump). The editor's "Infinite
 mode" (app.cpp) drives this: while playing it wraps `time` at `scene_seconds`, calls
@@ -247,12 +336,21 @@ sky preview); **Stylize** holds the palette post-process (incl. the `base_hue` s
 sphere's material/texture, **clouds** layer, and atmosphere (with a neutral-light
 material preview), or a ring's color ramp. Color-ramp rows expose a per-stop **alpha**
 slider. The **Generate** tab drives the random system generator (see below):
-seed/planet-count/moons/spacing/inclination/eccentricity knobs + rings/atmosphere
-toggles, with **Generate** / **Randomize** buttons that replace all bodies (Undo
-recovers the prior scene). Its **Eclipse loop** section (mirrored by an **Infinite**
+seed/planet-count/moons/spacing/inclination/eccentricity knobs + a **gas-giant ratio**
+slider (`gas_ratio`: fraction of planets that are gas giants, 0 = all rocky) +
+rings/atmosphere toggles, with **Generate** / **Randomize** buttons that replace all bodies (Undo
+recovers the prior scene). An **Appearance (advanced)** block of collapsing headers
+(Gas giants / Spin & tilt / Terrestrials / Feature chances) exposes the per-body
+appearance + probability params on `SystemGenParams` (storm chance/strength, belt
+count/width/turbulence/swirl/**band drift**; spin speed, axial tilt, sideways-tilt chance; water/exotic/
+crisp-biome/ice-cap/frozen/seasonal/cloud/**crater** chances; ring/**ring colors**/atmosphere/moon-cap/**sun-texture** chances) —
+"chance" sliders are probabilities, the rest bias a jittered random center; defaults
+reproduce the old hardcoded look. **These flow through to the eclipse loop too** (it
+calls `generate_system`), so they retune every cycle, not just one-shot Generate. Its **Eclipse loop** section (mirrored by an **Infinite**
 checkbox on the Timeline) toggles the infinite self-renewing mode, with a
 **Scene seconds** slider (fixed per-scene duration), a **Camera loops** knob
-(1–3), a **Morph/Snap** palette-transition combo and a **Regenerate now** button. The
+(1–3), a **Morph/Snap** palette-transition combo and a **Regenerate now** button (also
+**`N`** while in infinite mode — a dev shortcut to jump straight to the next cycle). The
 `render_material_preview` / `render_background_preview`
 thumbnails live in `core` (neutral lighting, no post-process) so the texture/sky read true.
 

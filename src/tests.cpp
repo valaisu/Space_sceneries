@@ -158,6 +158,48 @@ static void phase3() {
 
     // Re-serializing the parsed scene yields identical JSON (stable round-trip).
     assert(scene_to_json(back) == scene_to_json(scene));
+
+    // Editor settings (Generate sliders, eclipse loop, view prefs) round-trip
+    // through the "editor" section.
+    EditorSettings es;
+    es.gen.seed = 42;
+    es.gen.gas_ratio = 0.3f;
+    es.gen.crater_chance = 0.9f;
+    es.scene_seconds = 17.0f;
+    es.cam_loops = 3;
+    es.pal_transition = 1;
+    es.infinite_mode = true;
+    es.play_speed = 2.5f;
+    es.shade_mode = ShadeMode::Direction;
+    es.show_orbits = false;
+    EditorSettings es_back;
+    {
+        // Round-trip via a real file to exercise save_scene/load_scene.
+        const std::string p = "test_editor_roundtrip.json";
+        assert(save_scene(scene, es, p));
+        Scene loaded;
+        assert(load_scene(loaded, es_back, p));
+        std::remove(p.c_str());
+    }
+    assert(es_back.gen.seed == 42 && approx(es_back.gen.gas_ratio, 0.3f) &&
+           approx(es_back.gen.crater_chance, 0.9f) &&
+           approx(es_back.scene_seconds, 17.0f) && es_back.cam_loops == 3 &&
+           es_back.pal_transition == 1 && es_back.infinite_mode &&
+           approx(es_back.play_speed, 2.5f) &&
+           es_back.shade_mode == ShadeMode::Direction && !es_back.show_orbits);
+
+    // A scene with no "editor" section loads default EditorSettings.
+    EditorSettings es_default;
+    {
+        const std::string p = "test_no_editor.json";
+        assert(save_scene(scene, p));  // scene-only save omits "editor"
+        Scene loaded;
+        assert(load_scene(loaded, es_default, p));
+        std::remove(p.c_str());
+    }
+    assert(es_default.gen.seed == SystemGenParams{}.seed &&
+           approx(es_default.scene_seconds, EditorSettings{}.scene_seconds) &&
+           es_default.shade_mode == EditorSettings{}.shade_mode);
 }
 
 static void phase5() {
@@ -523,14 +565,126 @@ static void surface_texture() {
     m.tex_ramp = {{0.0f, Vec3(0.2f, 0, 0)}, {1.0f, Vec3(0.8f, 0, 0)}};
     assert(approx(surface_color(m, 0.5f).x, 0.5f));
 
+    // Terrain: below sea level reads as ocean (blue-dominant), above as land
+    // (from the ramp); a high-latitude point picks up the polar cap.
+    Material e;
+    e.pattern = 2;
+    e.noise_scale = 3.0f;
+    e.terrain.enabled = true;
+    e.terrain.sea_level = 2.0f;             // force everything underwater
+    e.terrain.ocean = Vec3(0.1f, 0.2f, 0.6f);
+    e.terrain.cap = 2.0f;                   // no caps for now
+    Vec3 sea = terrain_color(e, normalize(Vec3(0.3f, 0.2f, 0.5f)), 0.0f);
+    assert(sea.z > sea.x && sea.z > sea.y);  // ocean is blue-dominant
+    e.terrain.sea_level = -1.0f;            // force everything land
+    e.tex_ramp = {{0.0f, Vec3(0.2f, 0.6f, 0.2f)}, {1.0f, Vec3(0.2f, 0.6f, 0.2f)}};
+    Vec3 land = terrain_color(e, normalize(Vec3(0.3f, 0.2f, 0.5f)), 0.0f);
+    assert(land.y > land.x && land.y > land.z);  // land is green-dominant
+    // A near-pole point with caps on goes bright (toward white cap color).
+    e.terrain.cap = 0.5f;
+    Vec3 pole = terrain_color(e, normalize(Vec3(0.05f, 1.0f, 0.05f)), 0.0f);
+    assert(pole.x > 0.7f && pole.z > 0.7f);
+
+    // Posterize: with levels=3 the land lands on exactly the ramp's stop colors, so
+    // every sample is one of 3 flat shades (a smooth gradient would hit in-between
+    // values). This is what gives crisp region boundaries instead of mush.
+    Material q;
+    q.pattern = 2;
+    q.terrain.enabled = true;
+    q.terrain.sea_level = 0.0f;  // all land, so all 3 bands are reachable
+    q.terrain.cap = 2.0f;        // no caps
+    q.terrain.levels = 3;
+    q.tex_ramp = {{0.0f, Vec3(0.2f, 0, 0)}, {0.5f, Vec3(0.5f, 0, 0)}, {1.0f, Vec3(0.9f, 0, 0)}};
+    for (int i = 0; i < 400; ++i) {
+        Vec3 d = normalize(Vec3(std::sin(i * 0.3f), std::cos(i * 0.7f), std::sin(i * 0.13f)));
+        float x = terrain_color(q, d, 0.0f).x;
+        assert(approx(x, 0.2f) || approx(x, 0.5f) || approx(x, 0.9f));
+    }
+
+    // Gas-giant belts: band_levels posterizes the field into flat belts. With
+    // band_strength=1 the field is purely the posterized belts, so every sample is
+    // one of `levels` flat values (a smooth sine would hit in-between values).
+    Material gb;
+    gb.pattern = 1;
+    gb.band_strength = 1.0f;
+    gb.band_freq = 6.0f;
+    gb.band_levels = 3;
+    for (int i = 0; i < 400; ++i) {
+        Vec3 d = normalize(Vec3(std::sin(i * 0.3f), std::cos(i * 0.7f), std::sin(i * 0.13f)));
+        float f = surface_field(gb, d);
+        assert(approx(f, 0.0f) || approx(f, 0.5f) || approx(f, 1.0f));
+    }
+
+    // Storms: zero strength yields no coverage anywhere; a positive strength yields
+    // a strong oval somewhere (the guaranteed "great red spot").
+    Material st;
+    st.storm = 0.0f;
+    st.storm_seed = 42;
+    float maxw_off = 0.0f, maxw_on = 0.0f;
+    Material st_on = st;
+    st_on.storm = 0.8f;
+    for (int i = 0; i < 2000; ++i) {
+        Vec3 d = normalize(Vec3(std::sin(i * 0.11f), std::cos(i * 0.37f) - 0.3f,
+                                std::sin(i * 0.07f) + 0.2f));
+        maxw_off = std::max(maxw_off, storm_weight(st, d));
+        maxw_on = std::max(maxw_on, storm_weight(st_on, d));
+    }
+    assert(maxw_off == 0.0f && maxw_on > 0.5f);
+
+    // Craters: disabled -> multiplier 1 everywhere (never alters albedo); enabled ->
+    // crater floors darken (<1) while plains between craters stay at 1.
+    Craters cr_off;  // enabled defaults false
+    Craters cr_on;
+    cr_on.enabled = true;
+    cr_on.density = 5.0f;
+    cr_on.strength = 0.6f;
+    cr_on.seed = 7;
+    float cmin = 2.0f, cmax = 0.0f;
+    for (int i = 0; i < 4000; ++i) {
+        Vec3 d = normalize(Vec3(std::sin(i * 0.11f), std::cos(i * 0.37f),
+                                std::sin(i * 0.19f) + 0.1f));
+        assert(crater_shade(cr_off, d) == 1.0f);
+        float v = crater_shade(cr_on, d);
+        cmin = std::min(cmin, v);
+        cmax = std::max(cmax, v);
+    }
+    assert(cmin < 0.95f && cmax >= 1.0f);
+
     // JSON round-trips the new texture fields.
     Scene scene;
+    g.band_var = 0.7f;
+    g.band_levels = 5;
+    g.turbulence = 0.6f;
+    g.storm = 0.7f;
+    g.storm_seed = 123;
+    g.storm_color = Vec3(0.8f, 0.2f, 0.1f);
+    g.terrain.enabled = true;
+    g.terrain.sea_level = 0.4f;
+    g.terrain.levels = 4;
+    g.clouds.enabled = true;
+    g.clouds.drift = 0.05f;
+    g.band_drift = 0.04f;
+    g.craters.enabled = true;
+    g.craters.density = 5.5f;
+    g.craters.strength = 0.6f;
+    g.craters.seed = 77;
     auto sp = std::make_shared<Sphere>(Vec3(0, 0, 0), 1.0f, g);
     scene.bodies = {Body{sp}};
     Scene back = scene_from_json(scene_to_json(scene));
     auto bs = std::dynamic_pointer_cast<Sphere>(back.bodies[0].shape);
     assert(bs && approx(bs->material.band_strength, 1.0f) &&
            bs->material.noise_octaves == 4 && approx(bs->material.band_freq, 4.0f));
+    assert(approx(bs->material.band_var, 0.7f) && bs->material.terrain.enabled &&
+           approx(bs->material.terrain.sea_level, 0.4f) &&
+           bs->material.terrain.levels == 4 &&
+           approx(bs->material.clouds.drift, 0.05f));
+    assert(bs->material.band_levels == 5 && approx(bs->material.turbulence, 0.6f) &&
+           approx(bs->material.storm, 0.7f) && bs->material.storm_seed == 123 &&
+           approx(bs->material.storm_color.x, 0.8f));
+    assert(approx(bs->material.band_drift, 0.04f) && bs->material.craters.enabled &&
+           approx(bs->material.craters.density, 5.5f) &&
+           approx(bs->material.craters.strength, 0.6f) &&
+           bs->material.craters.seed == 77);
 }
 
 static void lighting() {
@@ -724,6 +878,50 @@ static void system_gen() {
                 }
             }
         }
+    }
+
+    // hero_kind reframes the close-up onto the requested planet type (the eclipse
+    // loop rotates this each cycle). Gas planets carry pattern 1, rocky pattern 2.
+    // Only assert when that type actually exists in the system (else it falls back).
+    auto hero_pattern = [](const Scene& s) {
+        auto h = std::dynamic_pointer_cast<Sphere>(s.bodies[s.cam.target].shape);
+        return h ? h->material.pattern : 0;
+    };
+    auto has_pattern = [](const Scene& s, int pat) {
+        for (size_t i = 1; i < s.bodies.size(); ++i)
+            if (auto sp = std::dynamic_pointer_cast<Sphere>(s.bodies[i].shape))
+                if (sp->material.pattern == pat) return true;
+        return false;
+    };
+    for (int seed = 1; seed <= 8; ++seed) {
+        SystemGenParams p;
+        p.seed = seed;
+        p.planet_count = 8;
+        Scene rocky;
+        p.hero_kind = 1;
+        generate_system(rocky, p);
+        if (has_pattern(rocky, 2)) assert(hero_pattern(rocky) == 2);
+        Scene gas;
+        p.hero_kind = 2;
+        generate_system(gas, p);
+        if (has_pattern(gas, 1)) assert(hero_pattern(gas) == 1);
+    }
+
+    // Eclipse loop slows its moons to at least one cycle per orbit, so they drift
+    // calmly instead of whirring around many times per scene.
+    for (int seed = 1; seed <= 6; ++seed) {
+        SystemGenParams p;
+        p.seed = seed;
+        p.planet_count = 5;
+        p.max_moons = 3;
+        Scene s;
+        float secs = 20.0f;
+        generate_eclipse_system(s, p, secs, 2);
+        for (const auto& b : s.bodies)
+            if (b.orbit.active && b.orbit.parent != 0)
+                if (auto sp = std::dynamic_pointer_cast<Sphere>(b.shape))
+                    if (!sp->material.emissive)
+                        assert(b.orbit.period >= secs - 1e-3f);  // >= one cycle per orbit
     }
 }
 

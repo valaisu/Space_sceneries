@@ -577,10 +577,40 @@ void draw_object_tab(Editor& ed) {
             ImGui::SliderInt("Octaves", &m.noise_octaves, 1, 8);
             ImGui::SliderFloat("Band strength", &m.band_strength, 0.0f, 1.0f);
             ImGui::SliderFloat("Band freq", &m.band_freq, 1.0f, 30.0f);
+            ImGui::SliderFloat("Band variation", &m.band_var, 0.0f, 2.0f);
             ImGui::SliderFloat("Warp", &m.warp, 0.0f, 2.0f);
+            ImGui::SliderInt("Belt colors", &m.band_levels, 0, 8);
+            ImGui::SetItemTooltip("Gas giants: 0 = each belt picks any color along the "
+                                  "ramp; 2+ = snap belts to that many distinct shades.");
+            ImGui::SliderFloat("Turbulence", &m.turbulence, 0.0f, 1.5f);
+            ImGui::SetItemTooltip("Zonal filament texture at the belt boundaries.");
+
+            ImGui::SeparatorText("Storms");
+            ImGui::SliderFloat("Storm strength", &m.storm, 0.0f, 1.0f);
+            if (m.storm > 0.0f) {
+                ImGui::SliderInt("Storm seed", &m.storm_seed, 0, 9999);
+                ImGui::ColorEdit3("Storm color", &m.storm_color.x);
+            }
+
             ImGui::SeparatorText("Surface colors");
             ramp_editor(m.tex_ramp, m.albedo);
             if (m.tex_ramp.empty()) ImGui::ColorEdit3("Detail", &m.detail.x);
+
+            ImGui::SeparatorText("Terrain (ocean / caps)");
+            Terrain& tr = m.terrain;
+            ImGui::Checkbox("Has terrain", &tr.enabled);
+            if (tr.enabled) {
+                ImGui::TextDisabled("Surface colors above are the land ramp (low->high)");
+                ImGui::SliderFloat("Sea level", &tr.sea_level, 0.0f, 1.0f);
+                ImGui::SliderInt("Bands", &tr.levels, 0, 8);
+                ImGui::SetItemTooltip("0 = smooth gradient; 2+ = posterize land into "
+                                      "flat regions with crisp boundaries.");
+                ImGui::ColorEdit3("Ocean", &tr.ocean.x);
+                ImGui::SliderFloat("Cap latitude", &tr.cap, 0.0f, 1.0f);
+                ImGui::ColorEdit3("Cap color", &tr.cap_color.x);
+                ImGui::SliderFloat("Cap season swing", &tr.cap_season, 0.0f, 0.3f);
+                drag_scale("Season period", &tr.season_period, 0.0f, 200.0f);
+            }
         }
         ImGui::SeparatorText("Clouds");
         Clouds& cl = m.clouds;
@@ -590,6 +620,7 @@ void draw_object_tab(Editor& ed) {
             ImGui::SliderInt("Cloud octaves", &cl.octaves, 1, 8);
             ImGui::SliderFloat("Coverage", &cl.coverage, 0.0f, 1.0f);
             ImGui::SliderFloat("Cloud opacity", &cl.opacity, 0.0f, 1.0f);
+            ImGui::SliderFloat("Cloud drift", &cl.drift, -0.2f, 0.2f);
             ImGui::TextDisabled("Color + alpha ramp (empty = solid white)");
             ramp_editor(cl.ramp, Vec3(1, 1, 1));
         }
@@ -832,6 +863,9 @@ void draw_generate_tab(Editor& ed) {
     ImGui::SeparatorText("System");
     ImGui::InputInt("Seed", &g.seed);
     ImGui::SliderInt("Planets", &g.planet_count, 1, 8);
+    ImGui::SliderFloat("Gas giant ratio", &g.gas_ratio, 0.0f, 1.0f);
+    ImGui::SetItemTooltip("Fraction of planets that are gas giants (0 = all rocky, "
+                          "1 = all gas). Inner planets stay a little rockier.");
     ImGui::SliderInt("Max moons / planet", &g.max_moons, 0, 4);
     drag_scale("Sun radius", &g.sun_radius, 0.3f, 6.0f);
 
@@ -846,6 +880,48 @@ void draw_generate_tab(Editor& ed) {
     ImGui::SeparatorText("Features");
     ImGui::Checkbox("Rings on gas giants", &g.rings);
     ImGui::Checkbox("Atmospheres", &g.atmospheres);
+
+    ImGui::SeparatorText("Appearance (advanced)");
+    ImGui::TextDisabled("Chances are 0..1; the rest bias a jittered random center.");
+    if (ImGui::CollapsingHeader("Gas giants")) {
+        ImGui::SliderFloat("Storm chance", &g.gas_storm_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Storm strength", &g.gas_storm_strength, 0.0f, 1.0f);
+        ImGui::SliderFloat("Belt count", &g.gas_belt_count, 2.0f, 14.0f);
+        ImGui::SliderFloat("Belt width variation", &g.gas_belt_var, 0.0f, 1.2f);
+        ImGui::SliderFloat("Turbulence", &g.gas_turbulence, 0.0f, 1.2f);
+        ImGui::SliderFloat("Swirl", &g.gas_swirl, 0.0f, 0.5f);
+        ImGui::SliderFloat("Band drift", &g.gas_drift, 0.0f, 0.1f, "%.3f rev/s");
+        ImGui::SetItemTooltip("How fast belts/storms slide over time (0 = static).");
+    }
+    if (ImGui::CollapsingHeader("Spin & tilt")) {
+        ImGui::SliderFloat("Spin speed", &g.spin_speed, 0.2f, 3.0f);
+        ImGui::SetItemTooltip("Rotation-speed multiplier (1 = default).");
+        ImGui::SliderFloat("Axial tilt", &g.axial_tilt, 0.0f, 45.0f, "%.0f deg");
+        ImGui::SliderFloat("Sideways-tilt chance", &g.extreme_tilt_chance, 0.0f, 0.5f);
+        ImGui::SetItemTooltip("Chance of a Uranus-like ~90 deg axial tilt.");
+    }
+    if (ImGui::CollapsingHeader("Terrestrials")) {
+        ImGui::SliderFloat("Water-world chance", &g.water_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Exotic-hue chance", &g.exotic_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Crisp-biome chance", &g.biome_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Ice-cap chance", &g.cap_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Frozen-world chance", &g.frozen_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Seasonal-cap chance", &g.season_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Cloud chance", &g.cloud_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Crater chance", &g.crater_chance, 0.0f, 1.0f);
+        ImGui::SetItemTooltip("Airless (no-atmosphere) rocky worlds + moons get impact craters.");
+    }
+    if (ImGui::CollapsingHeader("Feature chances")) {
+        ImGui::SliderFloat("Ring chance", &g.ring_chance, 0.0f, 1.0f);
+        ImGui::SetItemTooltip("Per gas giant; needs 'Rings on gas giants'.");
+        ImGui::SliderFloat("Ring colors", &g.ring_colors, 1.0f, 8.0f, "%.0f");
+        ImGui::SetItemTooltip("~number of concentric color bands on a ring.");
+        ImGui::SliderFloat("Atmosphere chance", &g.atmosphere_chance, 0.0f, 1.0f);
+        ImGui::SetItemTooltip("Per planet; needs 'Atmospheres'.");
+        ImGui::SliderFloat("Moon polar-cap chance", &g.moon_cap_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Sun texture chance", &g.sun_texture_chance, 0.0f, 1.0f);
+        ImGui::SetItemTooltip("Chance the sun shows faint granulation / soft banding.");
+    }
 
     ImGui::Separator();
     if (ImGui::Button("Generate system")) do_generate(ed);
@@ -1008,8 +1084,34 @@ void redo(Editor& ed) {
 }
 
 // Write the scene to scenes/<name>.json and raise the confirmation popup.
+// Gather the editor-only authoring controls (Generate sliders, eclipse loop,
+// view prefs) so they can be persisted alongside the scene.
+EditorSettings editor_settings(const Editor& ed) {
+    EditorSettings s;
+    s.gen = ed.gen;
+    s.scene_seconds = ed.scene_seconds;
+    s.cam_loops = ed.cam_loops;
+    s.pal_transition = ed.pal_transition;
+    s.infinite_mode = ed.infinite_mode;
+    s.play_speed = ed.play_speed;
+    s.shade_mode = ed.shade_mode;
+    s.show_orbits = ed.show_orbits;
+    return s;
+}
+
+void apply_editor_settings(Editor& ed, const EditorSettings& s) {
+    ed.gen = s.gen;
+    ed.scene_seconds = s.scene_seconds;
+    ed.cam_loops = s.cam_loops;
+    ed.pal_transition = s.pal_transition;
+    ed.infinite_mode = s.infinite_mode;
+    ed.play_speed = s.play_speed;
+    ed.shade_mode = s.shade_mode;
+    ed.show_orbits = s.show_orbits;
+}
+
 void do_save(Editor& ed, const std::string& name) {
-    save_scene(ed.scene, scene_path(name));
+    save_scene(ed.scene, editor_settings(ed), scene_path(name));
     std::snprintf(ed.scene_file, sizeof(ed.scene_file), "%s", name.c_str());
     ed.dialog_verb = "Saved";
     ed.dialog_path = fs::absolute(scene_path(name)).string();
@@ -1019,8 +1121,10 @@ void do_save(Editor& ed, const std::string& name) {
 // Load scenes/<name>.json, replacing the scene. Forces a redraw so it shows.
 void do_load(Editor& ed, const std::string& name) {
     Scene loaded;
-    if (!load_scene(loaded, scene_path(name))) return;
+    EditorSettings settings;
+    if (!load_scene(loaded, settings, scene_path(name))) return;
     ed.scene = loaded;
+    apply_editor_settings(ed, settings);
     ed.selected = SEL_NONE;
     std::snprintf(ed.scene_file, sizeof(ed.scene_file), "%s", name.c_str());
     // A load starts a fresh undo history rooted at the loaded scene.
@@ -1129,7 +1233,8 @@ void draw_menu_bar(Editor& ed) {
             if (ImGui::MenuItem("Load...")) ed.want_load = true;
             ImGui::Separator();
             // Save the current scene as the startup default (loaded on next launch).
-            if (ImGui::MenuItem("Set as default")) save_scene(ed.scene, scene_path("default"));
+            if (ImGui::MenuItem("Set as default"))
+                save_scene(ed.scene, editor_settings(ed), scene_path("default"));
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
@@ -1334,6 +1439,12 @@ void draw_viewport(Editor& ed) {
     ImGuiIO& io = ImGui::GetIO();
     if (ed.xmode == XMode::None && hovered && !io.WantTextInput) {
         if (ImGui::IsKeyPressed(ImGuiKey_Space)) ed.playing = !ed.playing;
+        // N: jump to the next eclipse cycle (regenerate) — a dev shortcut for quickly
+        // flipping through generated planets without waiting out the cycle.
+        if (ImGui::IsKeyPressed(ImGuiKey_N) && ed.infinite_mode) {
+            ed.time = 0.0f;
+            eclipse_next_cycle(ed);
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_0) || ImGui::IsKeyPressed(ImGuiKey_Keypad0))
             ed.look_through_camera = !ed.look_through_camera;
 
@@ -1509,10 +1620,13 @@ int main() {
 
     Editor ed;
     // Load the user's saved default if present, else the built-in starter scene.
-    if (load_scene(ed.scene, scene_path("default")))
+    EditorSettings default_settings;
+    if (load_scene(ed.scene, default_settings, scene_path("default"))) {
+        apply_editor_settings(ed, default_settings);
         std::snprintf(ed.scene_file, sizeof(ed.scene_file), "%s", "default");
-    else
+    } else {
         ed.scene = make_default_scene();
+    }
     ed.last_committed = scene_to_json(ed.scene);  // undo/redo baseline
 
     while (!glfwWindowShouldClose(window)) {
