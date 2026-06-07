@@ -33,6 +33,54 @@ post-process crushes the final image toward deliberate pixel-art color.
   resolution is editable in the Timeline, and **`F`** shows the scene fullscreen
   (black-letterboxed to the output aspect).
 
+## Quick start
+
+After building and launching, the editor opens with a default scene in the live viewport.
+
+### Layout
+
+- **Central viewport** — raytraced preview; right-click-drag to orbit, scroll or `+`/`-` to zoom.
+- **Properties panel (right)** — tabbed: **Object** (selected body), **Generate** (random system), **World** (starfield/lighting), **Stylize** (palette).
+- **Timeline (bottom)** — playback controls, resolution, and export.
+
+### Viewport controls
+
+| Action | Input |
+|---|---|
+| Select object | Left-click (or click its orbit path) |
+| Move selected object | Left-drag |
+| Orbit view | Right-drag |
+| Zoom | Scroll wheel or `+` / `-` |
+| Align view to axis | `X` / `Y` / `Z` |
+| Recenter pivot on origin | `C` |
+| Look through render camera | `0` |
+| Rotate selected (modal) | `R`, then move mouse → confirm Left-click / cancel Right-click |
+| Scale selected (modal) | `S`, then move mouse → confirm Left-click / cancel Right-click |
+| Delete selected | `Delete` |
+
+### General hotkeys
+
+| Hotkey | Action |
+|---|---|
+| `Space` | Play / Pause |
+| `F` | Toggle fullscreen (hides panels, letterboxed to output aspect) |
+| `Esc` | Exit fullscreen |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / Redo |
+| `Ctrl+S` | Save scene |
+| `Ctrl+Shift+S` | Save As |
+
+### Infinite eclipse loop
+
+Infinite mode auto-generates a fresh system at each eclipse and morphs the palette — the scene renews itself forever.
+
+1. Open the **Generate** tab and adjust seed/planet count/spacing to taste (or leave defaults).
+2. Tick **Infinite** on the Timeline strip (or use the *Eclipse loop* section in the Generate tab).
+3. Press **Space** to play. The scene opens on an eclipse, reveals the system, then silently regenerates at the next eclipse.
+4. Press **`N`** at any time to skip immediately to the next cycle.
+5. The **Scene seconds** slider (Generate → Eclipse loop) controls how long each cycle lasts; **Camera loops** (1–3) sets how many times the camera orbits per cycle.
+
+Use **Export GIF… → By loop cycles** in the Timeline to bake N eclipse cycles to a `.gif`.
+
 ## Build & run
 
 GLFW and OpenGL come from the system; `nlohmann/json`, Dear ImGui, `stb_image_write`,
