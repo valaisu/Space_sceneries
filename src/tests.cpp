@@ -523,14 +523,42 @@ static void surface_texture() {
     m.tex_ramp = {{0.0f, Vec3(0.2f, 0, 0)}, {1.0f, Vec3(0.8f, 0, 0)}};
     assert(approx(surface_color(m, 0.5f).x, 0.5f));
 
+    // Terrain: below sea level reads as ocean (blue-dominant), above as land
+    // (from the ramp); a high-latitude point picks up the polar cap.
+    Material e;
+    e.pattern = 2;
+    e.noise_scale = 3.0f;
+    e.terrain.enabled = true;
+    e.terrain.sea_level = 2.0f;             // force everything underwater
+    e.terrain.ocean = Vec3(0.1f, 0.2f, 0.6f);
+    e.terrain.cap = 2.0f;                   // no caps for now
+    Vec3 sea = terrain_color(e, normalize(Vec3(0.3f, 0.2f, 0.5f)), 0.0f);
+    assert(sea.z > sea.x && sea.z > sea.y);  // ocean is blue-dominant
+    e.terrain.sea_level = -1.0f;            // force everything land
+    e.tex_ramp = {{0.0f, Vec3(0.2f, 0.6f, 0.2f)}, {1.0f, Vec3(0.2f, 0.6f, 0.2f)}};
+    Vec3 land = terrain_color(e, normalize(Vec3(0.3f, 0.2f, 0.5f)), 0.0f);
+    assert(land.y > land.x && land.y > land.z);  // land is green-dominant
+    // A near-pole point with caps on goes bright (toward white cap color).
+    e.terrain.cap = 0.5f;
+    Vec3 pole = terrain_color(e, normalize(Vec3(0.05f, 1.0f, 0.05f)), 0.0f);
+    assert(pole.x > 0.7f && pole.z > 0.7f);
+
     // JSON round-trips the new texture fields.
     Scene scene;
+    g.band_var = 0.7f;
+    g.terrain.enabled = true;
+    g.terrain.sea_level = 0.4f;
+    g.clouds.enabled = true;
+    g.clouds.drift = 0.05f;
     auto sp = std::make_shared<Sphere>(Vec3(0, 0, 0), 1.0f, g);
     scene.bodies = {Body{sp}};
     Scene back = scene_from_json(scene_to_json(scene));
     auto bs = std::dynamic_pointer_cast<Sphere>(back.bodies[0].shape);
     assert(bs && approx(bs->material.band_strength, 1.0f) &&
            bs->material.noise_octaves == 4 && approx(bs->material.band_freq, 4.0f));
+    assert(approx(bs->material.band_var, 0.7f) && bs->material.terrain.enabled &&
+           approx(bs->material.terrain.sea_level, 0.4f) &&
+           approx(bs->material.clouds.drift, 0.05f));
 }
 
 static void lighting() {

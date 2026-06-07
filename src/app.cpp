@@ -577,10 +577,24 @@ void draw_object_tab(Editor& ed) {
             ImGui::SliderInt("Octaves", &m.noise_octaves, 1, 8);
             ImGui::SliderFloat("Band strength", &m.band_strength, 0.0f, 1.0f);
             ImGui::SliderFloat("Band freq", &m.band_freq, 1.0f, 30.0f);
+            ImGui::SliderFloat("Band variation", &m.band_var, 0.0f, 2.0f);
             ImGui::SliderFloat("Warp", &m.warp, 0.0f, 2.0f);
             ImGui::SeparatorText("Surface colors");
             ramp_editor(m.tex_ramp, m.albedo);
             if (m.tex_ramp.empty()) ImGui::ColorEdit3("Detail", &m.detail.x);
+
+            ImGui::SeparatorText("Terrain (ocean / caps)");
+            Terrain& tr = m.terrain;
+            ImGui::Checkbox("Has terrain", &tr.enabled);
+            if (tr.enabled) {
+                ImGui::TextDisabled("Surface colors above are the land ramp (low->high)");
+                ImGui::SliderFloat("Sea level", &tr.sea_level, 0.0f, 1.0f);
+                ImGui::ColorEdit3("Ocean", &tr.ocean.x);
+                ImGui::SliderFloat("Cap latitude", &tr.cap, 0.0f, 1.0f);
+                ImGui::ColorEdit3("Cap color", &tr.cap_color.x);
+                ImGui::SliderFloat("Cap season swing", &tr.cap_season, 0.0f, 0.3f);
+                drag_scale("Season period", &tr.season_period, 0.0f, 200.0f);
+            }
         }
         ImGui::SeparatorText("Clouds");
         Clouds& cl = m.clouds;
@@ -590,6 +604,7 @@ void draw_object_tab(Editor& ed) {
             ImGui::SliderInt("Cloud octaves", &cl.octaves, 1, 8);
             ImGui::SliderFloat("Coverage", &cl.coverage, 0.0f, 1.0f);
             ImGui::SliderFloat("Cloud opacity", &cl.opacity, 0.0f, 1.0f);
+            ImGui::SliderFloat("Cloud drift", &cl.drift, -0.2f, 0.2f);
             ImGui::TextDisabled("Color + alpha ramp (empty = solid white)");
             ramp_editor(cl.ramp, Vec3(1, 1, 1));
         }
