@@ -14,5 +14,5 @@
 
 .claude
 
-!renders/animation_800x400_0.gif
-!renders/animation_800x400_1.gif
+# !renders/animation_800x400_0.gif
+# !renders/animation_800x400_1.gif # too big?
