@@ -66,8 +66,10 @@ struct Light {
 //  - Lit:        positional lights from emissive bodies + shadows (matches export).
 enum class ShadeMode { Direction = 0, InBetween = 1, Lit = 2 };
 
-// Nearest hit across the world within (t_min, t_max).
-bool hit_world(const World& world, const Ray& r, float t_min, float t_max, HitRecord& rec);
+// Nearest hit across the world within (t_min, t_max). Pass shading=false for
+// occlusion/shadow rays to skip procedural surface texturing on each candidate.
+bool hit_world(const World& world, const Ray& r, float t_min, float t_max,
+               HitRecord& rec, bool shading = true);
 
 // Stage 6: additive atmosphere limb glow at a surface hit. `normal` is the
 // outward surface normal, `view_dir` points from the surface toward the camera,

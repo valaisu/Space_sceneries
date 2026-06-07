@@ -93,12 +93,14 @@ void box_blur(std::vector<Vec3>& img, int w, int h, int r) {
         return s[static_cast<size_t>(y) * w + x];
     };
     float inv = 1.0f / (2 * r + 1);
+    #pragma omp parallel for schedule(static)
     for (int y = 0; y < h; ++y)             // horizontal
         for (int x = 0; x < w; ++x) {
             Vec3 sum(0, 0, 0);
             for (int k = -r; k <= r; ++k) sum = sum + at(img, x + k, y);
             tmp[static_cast<size_t>(y) * w + x] = sum * inv;
         }
+    #pragma omp parallel for schedule(static)
     for (int y = 0; y < h; ++y)             // vertical
         for (int x = 0; x < w; ++x) {
             Vec3 sum(0, 0, 0);
@@ -246,6 +248,7 @@ void apply_post(const PostProcess& pp, int w, int h, std::vector<uint32_t>& pixe
     int radius = std::max(0, static_cast<int>(pp.blur_radius + 0.5f));
     for (int it = 0; it < iters; ++it) {
         box_blur(img, w, h, radius);
+        #pragma omp parallel for schedule(static)
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
                 size_t idx = static_cast<size_t>(y) * w + x;

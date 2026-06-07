@@ -84,12 +84,13 @@ Vec3 shooting_stars(Vec3 dir, const Background& bg, float time) {
 }
 }  // namespace
 
-bool hit_world(const World& world, const Ray& r, float t_min, float t_max, HitRecord& rec) {
+bool hit_world(const World& world, const Ray& r, float t_min, float t_max,
+               HitRecord& rec, bool shading) {
     bool hit_anything = false;
     float closest = t_max;
     HitRecord temp;
     for (const auto& obj : world) {
-        if (obj->hit(r, t_min, closest, temp)) {
+        if (obj->hit(r, t_min, closest, temp, shading)) {
             hit_anything = true;
             closest = temp.t;
             rec = temp;
@@ -195,10 +196,10 @@ Vec3 ray_color(const Ray& r, const World& world, const std::vector<Light>& light
         return background(r, bg, time);
 
     // Emissive surfaces ignore lighting/shadows (sun, self-lit bodies). (3.4)
-    if (rec.material.emissive)
-        return rec.material.albedo;
+    if (rec.material->emissive)
+        return rec.albedo;
 
-    const Vec3 albedo = rec.material.albedo;
+    const Vec3 albedo = rec.albedo;
     Vec3 color = albedo * ambient;       // ambient floor so shadows aren't pure black
     const float scale = 1.0f - ambient;  // a single full-on light reaches full albedo
 
@@ -221,17 +222,18 @@ Vec3 ray_color(const Ray& r, const World& world, const std::vector<Light>& light
 
         // Two-sided surfaces (rings) are lit when the sun hits either face.
         float ndl = dot(rec.normal, to_light);
-        float diffuse = rec.material.two_sided ? std::fabs(ndl) : std::max(0.0f, ndl);
+        float diffuse = rec.material->two_sided ? std::fabs(ndl) : std::max(0.0f, ndl);
         if (diffuse <= 0.0f) continue;
 
         if (shadows) {
             // Only opaque bodies cast shadows; emissive bodies (the suns, including
             // the light's own sphere at max_dist) are transparent to shadow rays.
             // Offset toward the lit face so a back-lit two-sided surface doesn't self-shadow.
-            Vec3 soff = (rec.material.two_sided && ndl < 0.0f) ? -rec.normal : rec.normal;
+            Vec3 soff = (rec.material->two_sided && ndl < 0.0f) ? -rec.normal : rec.normal;
             Ray shadow(rec.p + soff * EPS, to_light);
             HitRecord occ;
-            if (hit_world(world, shadow, EPS, max_dist - EPS, occ) && !occ.material.emissive)
+            if (hit_world(world, shadow, EPS, max_dist - EPS, occ, false) &&
+                !occ.material->emissive)
                 continue;
         }
 
@@ -241,12 +243,12 @@ Vec3 ray_color(const Ray& r, const World& world, const std::vector<Light>& light
     }
 
     // Stage 6: additive atmosphere limb glow, keyed off the main (first) light.
-    if (rec.material.atmosphere.enabled && !lights.empty()) {
+    if (rec.material->atmosphere.enabled && !lights.empty()) {
         Vec3 view_dir = normalize(-r.direction);
         const Light& main = lights[0];
         Vec3 to_light = main.directional ? normalize(-main.vec)
                                          : normalize(main.vec - rec.p);
-        color = color + atmosphere_glow(rec.material.atmosphere, rec.normal,
+        color = color + atmosphere_glow(rec.material->atmosphere, rec.normal,
                                         view_dir, to_light);
     }
     return color;

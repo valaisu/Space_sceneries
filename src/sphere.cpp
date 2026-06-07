@@ -1,21 +1,34 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 #include "sphere.h"
 
 namespace {
 constexpr float PI = 3.14159265358979323846f;
 
-// Deterministic 3D hash -> [0,1] at integer lattice points.
-float hash31(float x, float y, float z) {
-    float h = std::sin(x * 127.1f + y * 311.7f + z * 74.7f) * 43758.5453f;
-    return h - std::floor(h);
+// Integer bit-mix (Murmur-style finalizer) -> well-distributed uint32. The noise
+// hashes below build on this instead of std::sin: the trig hash dominated the
+// texture cost (8 calls per value-noise corner, dozens per fbm pixel), and a
+// no-trig mix is several times faster for visually equivalent value noise.
+uint32_t mix32(uint32_t h) {
+    h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+    return h;
+}
+uint32_t key(float v) {  // quantize a coordinate to a lattice key (fract preserved ×4096)
+    return static_cast<uint32_t>(static_cast<int32_t>(std::floor(v * 4096.0f)));
 }
 
-// Deterministic 1D hash -> [0,1] (storm placement).
+// Deterministic 3D hash -> [0,1]. Used at integer lattice points (value noise) and
+// at fixed fractional offsets (craters); the ×4096 quantization keeps both distinct.
+float hash31(float x, float y, float z) {
+    uint32_t h = mix32(key(x) + mix32(key(y) + mix32(key(z))));
+    return (h >> 8) * (1.0f / 16777216.0f);
+}
+
+// Deterministic 1D hash -> [0,1] (storm/belt placement).
 float hash11(float x) {
-    float h = std::sin(x * 91.37f + 13.1f) * 43758.5453f;
-    return h - std::floor(h);
+    return (mix32(key(x)) >> 8) * (1.0f / 16777216.0f);
 }
 
 // Smooth 3D value noise in [0,1] (trilinear interpolation of lattice hashes).
@@ -182,7 +195,8 @@ Vec3 surface_color(const Material& m, float field) {
 
 // Phase 2 / 4.2: ray-sphere intersection. Solve at^2 + bt + c = 0 and return the
 // nearest root in (t_min, t_max). Uses the half-b form to save a couple of mults.
-bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
+bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec,
+                 bool shading) const {
     Vec3 oc = r.origin - center;
     float a = dot(r.direction, r.direction);
     float half_b = dot(oc, r.direction);
@@ -202,30 +216,35 @@ bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
     rec.t = root;
     rec.p = r.point_at_parameter(root);
     rec.normal = normalize(rec.p - center);  // outward normal
-    rec.material = material;
+    rec.material = &material;
+    rec.albedo = material.albedo;
+
+    // Occlusion rays only need geometry + the material pointer; skip the (expensive)
+    // procedural texture so shadow tests don't pay for noise they never read.
+    if (!shading) return true;
 
     // Phase 9 / Stage 4: procedural surface texture. Sample 3D object-space noise
     // at the un-spun body-local point (no pole pinch), so it rotates with spin.
     if (material.pattern != 0) {
         Vec3 ln = rotate_about(rec.normal, spin_axis, -spin_angle);
         if (material.terrain.enabled) {
-            rec.material.albedo = terrain_color(material, ln, season_swing);
+            rec.albedo = terrain_color(material, ln, season_swing);
         } else {
             // Gas-giant bands sample at a (possibly) drifting angle so belts/storms
             // slide slowly over time; rocky surfaces use the plain spin angle.
             Vec3 bn = (material.band_drift != 0.0f)
                           ? rotate_about(rec.normal, spin_axis, -band_angle)
                           : ln;
-            rec.material.albedo = surface_color(material, surface_field(material, bn));
+            rec.albedo = surface_color(material, surface_field(material, bn));
             // Gas-giant storms: oval vortices blended over the banded surface.
             if (material.storm > 0.0f) {
                 float w = storm_weight(material, bn);
-                rec.material.albedo = rec.material.albedo * (1.0f - w) + material.storm_color * w;
+                rec.albedo = rec.albedo * (1.0f - w) + material.storm_color * w;
             }
         }
         // Impact craters (airless rocky bodies): bowl shading over the base albedo.
         if (material.craters.enabled)
-            rec.material.albedo = rec.material.albedo * crater_shade(material.craters, ln);
+            rec.albedo = rec.albedo * crater_shade(material.craters, ln);
     }
     // Cloud layer: a second translucent fbm texture composited over the base.
     if (material.clouds.enabled) {
@@ -239,7 +258,7 @@ bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
         if (cl.ramp.empty()) { cc = Vec3(1, 1, 1); a = f; }
         else cc = sample_color_ramp(cl.ramp, f, &a);
         a = std::clamp(a * cl.opacity, 0.0f, 1.0f);
-        rec.material.albedo = rec.material.albedo * (1.0f - a) + cc * a;
+        rec.albedo = rec.albedo * (1.0f - a) + cc * a;
     }
     return true;
 }

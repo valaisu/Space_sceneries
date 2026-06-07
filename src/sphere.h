@@ -24,7 +24,8 @@ public:
     Sphere(Vec3 c, float radius, Material material)
         : radius(radius), material(material) { center = c; }
 
-    bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override;
+    bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec,
+             bool shading = true) const override;
     std::shared_ptr<Hittable> clone() const override {
         return std::make_shared<Sphere>(*this);
     }

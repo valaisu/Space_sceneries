@@ -12,16 +12,23 @@ struct HitRecord {
     float t = 0.0f;
     Vec3 p;          // intersection point
     Vec3 normal;     // surface normal at p
-    Material material;
+    // The material is referenced, not copied (it lives in the posed shape for the
+    // duration of the render) — copying it per hit meant deep-copying its color-ramp
+    // vectors on every primary and shadow ray. `albedo` is the final surface color,
+    // i.e. material->albedo after any procedural texture/ramp sampling.
+    const Material* material = nullptr;
+    Vec3 albedo;
 };
 
 class Hittable {
 public:
     virtual ~Hittable() = default;
 
-    // Returns true and fills `rec` if the ray hits within (t_min, t_max).
-    // Concrete intersection math is implemented in Phase 2 (4.2).
-    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const = 0;
+    // Returns true and fills `rec` if the ray hits within (t_min, t_max). When
+    // `shading` is false (shadow/occlusion rays) the expensive procedural surface
+    // texture is skipped — only geometry + the material pointer are filled.
+    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec,
+                     bool shading = true) const = 0;
 
     // Deep copy preserving the dynamic type — used to pose a body at a given time
     // without mutating the authored scene (Phase 6).

@@ -377,7 +377,7 @@ static void phase9() {
         HitRecord rec;
         bool hit = s.hit(r, 1e-3f, 1e30f, rec);
         assert(hit);
-        return rec.material.albedo.x;  // grayscale here (white->black mix)
+        return rec.albedo.x;  // grayscale here (white->black mix)
     };
 
     // Two different surface points -> generally different texture values.
@@ -395,7 +395,7 @@ static void phase9() {
     HitRecord rec;
     solid.spin_angle = 2.0f;
     solid.hit(Ray(Vec3(0, 0, 5), Vec3(0, 0, -1)), 1e-3f, 1e30f, rec);
-    assert(approx(rec.material.albedo.x, 0.3f) && approx(rec.material.albedo.z, 0.9f));
+    assert(approx(rec.albedo.x, 0.3f) && approx(rec.albedo.z, 0.9f));
 }
 
 static void phase10() {
@@ -444,7 +444,7 @@ static void ring_ramp() {
         Ray r(Vec3(radius, 0, 5), Vec3(0, 0, -1));
         bool ok = d.hit(r, 1e-3f, 1e30f, rec);
         assert(ok);
-        return rec.material.albedo;
+        return rec.albedo;
     };
     Vec3 inner = hit_at(1.0f);   // t = 0 -> red
     assert(approx(inner.x, 1.0f) && approx(inner.y, 0.0f));
@@ -458,7 +458,7 @@ static void ring_ramp() {
     Disk plain(Vec3(0, 0, 0), Vec3(0, 0, 1), 1.0f, 3.0f, solid);
     Ray r(Vec3(2, 0, 5), Vec3(0, 0, -1));
     assert(plain.hit(r, 1e-3f, 1e30f, rec));
-    assert(approx(rec.material.albedo.x, 0.3f) && approx(rec.material.albedo.z, 0.5f));
+    assert(approx(rec.albedo.x, 0.3f) && approx(rec.albedo.z, 0.5f));
 
     // JSON round-trips the stops.
     Scene scene;
