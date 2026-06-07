@@ -158,6 +158,48 @@ static void phase3() {
 
     // Re-serializing the parsed scene yields identical JSON (stable round-trip).
     assert(scene_to_json(back) == scene_to_json(scene));
+
+    // Editor settings (Generate sliders, eclipse loop, view prefs) round-trip
+    // through the "editor" section.
+    EditorSettings es;
+    es.gen.seed = 42;
+    es.gen.gas_ratio = 0.3f;
+    es.gen.crater_chance = 0.9f;
+    es.scene_seconds = 17.0f;
+    es.cam_loops = 3;
+    es.pal_transition = 1;
+    es.infinite_mode = true;
+    es.play_speed = 2.5f;
+    es.shade_mode = ShadeMode::Direction;
+    es.show_orbits = false;
+    EditorSettings es_back;
+    {
+        // Round-trip via a real file to exercise save_scene/load_scene.
+        const std::string p = "test_editor_roundtrip.json";
+        assert(save_scene(scene, es, p));
+        Scene loaded;
+        assert(load_scene(loaded, es_back, p));
+        std::remove(p.c_str());
+    }
+    assert(es_back.gen.seed == 42 && approx(es_back.gen.gas_ratio, 0.3f) &&
+           approx(es_back.gen.crater_chance, 0.9f) &&
+           approx(es_back.scene_seconds, 17.0f) && es_back.cam_loops == 3 &&
+           es_back.pal_transition == 1 && es_back.infinite_mode &&
+           approx(es_back.play_speed, 2.5f) &&
+           es_back.shade_mode == ShadeMode::Direction && !es_back.show_orbits);
+
+    // A scene with no "editor" section loads default EditorSettings.
+    EditorSettings es_default;
+    {
+        const std::string p = "test_no_editor.json";
+        assert(save_scene(scene, p));  // scene-only save omits "editor"
+        Scene loaded;
+        assert(load_scene(loaded, es_default, p));
+        std::remove(p.c_str());
+    }
+    assert(es_default.gen.seed == SystemGenParams{}.seed &&
+           approx(es_default.scene_seconds, EditorSettings{}.scene_seconds) &&
+           es_default.shade_mode == EditorSettings{}.shade_mode);
 }
 
 static void phase5() {
@@ -589,6 +631,25 @@ static void surface_texture() {
     }
     assert(maxw_off == 0.0f && maxw_on > 0.5f);
 
+    // Craters: disabled -> multiplier 1 everywhere (never alters albedo); enabled ->
+    // crater floors darken (<1) while plains between craters stay at 1.
+    Craters cr_off;  // enabled defaults false
+    Craters cr_on;
+    cr_on.enabled = true;
+    cr_on.density = 5.0f;
+    cr_on.strength = 0.6f;
+    cr_on.seed = 7;
+    float cmin = 2.0f, cmax = 0.0f;
+    for (int i = 0; i < 4000; ++i) {
+        Vec3 d = normalize(Vec3(std::sin(i * 0.11f), std::cos(i * 0.37f),
+                                std::sin(i * 0.19f) + 0.1f));
+        assert(crater_shade(cr_off, d) == 1.0f);
+        float v = crater_shade(cr_on, d);
+        cmin = std::min(cmin, v);
+        cmax = std::max(cmax, v);
+    }
+    assert(cmin < 0.95f && cmax >= 1.0f);
+
     // JSON round-trips the new texture fields.
     Scene scene;
     g.band_var = 0.7f;
@@ -602,6 +663,11 @@ static void surface_texture() {
     g.terrain.levels = 4;
     g.clouds.enabled = true;
     g.clouds.drift = 0.05f;
+    g.band_drift = 0.04f;
+    g.craters.enabled = true;
+    g.craters.density = 5.5f;
+    g.craters.strength = 0.6f;
+    g.craters.seed = 77;
     auto sp = std::make_shared<Sphere>(Vec3(0, 0, 0), 1.0f, g);
     scene.bodies = {Body{sp}};
     Scene back = scene_from_json(scene_to_json(scene));
@@ -615,6 +681,10 @@ static void surface_texture() {
     assert(bs->material.band_levels == 5 && approx(bs->material.turbulence, 0.6f) &&
            approx(bs->material.storm, 0.7f) && bs->material.storm_seed == 123 &&
            approx(bs->material.storm_color.x, 0.8f));
+    assert(approx(bs->material.band_drift, 0.04f) && bs->material.craters.enabled &&
+           approx(bs->material.craters.density, 5.5f) &&
+           approx(bs->material.craters.strength, 0.6f) &&
+           bs->material.craters.seed == 77);
 }
 
 static void lighting() {

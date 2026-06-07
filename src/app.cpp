@@ -890,6 +890,8 @@ void draw_generate_tab(Editor& ed) {
         ImGui::SliderFloat("Belt width variation", &g.gas_belt_var, 0.0f, 1.2f);
         ImGui::SliderFloat("Turbulence", &g.gas_turbulence, 0.0f, 1.2f);
         ImGui::SliderFloat("Swirl", &g.gas_swirl, 0.0f, 0.5f);
+        ImGui::SliderFloat("Band drift", &g.gas_drift, 0.0f, 0.1f, "%.3f rev/s");
+        ImGui::SetItemTooltip("How fast belts/storms slide over time (0 = static).");
     }
     if (ImGui::CollapsingHeader("Spin & tilt")) {
         ImGui::SliderFloat("Spin speed", &g.spin_speed, 0.2f, 3.0f);
@@ -906,13 +908,19 @@ void draw_generate_tab(Editor& ed) {
         ImGui::SliderFloat("Frozen-world chance", &g.frozen_chance, 0.0f, 1.0f);
         ImGui::SliderFloat("Seasonal-cap chance", &g.season_chance, 0.0f, 1.0f);
         ImGui::SliderFloat("Cloud chance", &g.cloud_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Crater chance", &g.crater_chance, 0.0f, 1.0f);
+        ImGui::SetItemTooltip("Airless (no-atmosphere) rocky worlds + moons get impact craters.");
     }
     if (ImGui::CollapsingHeader("Feature chances")) {
         ImGui::SliderFloat("Ring chance", &g.ring_chance, 0.0f, 1.0f);
         ImGui::SetItemTooltip("Per gas giant; needs 'Rings on gas giants'.");
+        ImGui::SliderFloat("Ring colors", &g.ring_colors, 1.0f, 8.0f, "%.0f");
+        ImGui::SetItemTooltip("~number of concentric color bands on a ring.");
         ImGui::SliderFloat("Atmosphere chance", &g.atmosphere_chance, 0.0f, 1.0f);
         ImGui::SetItemTooltip("Per planet; needs 'Atmospheres'.");
         ImGui::SliderFloat("Moon polar-cap chance", &g.moon_cap_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Sun texture chance", &g.sun_texture_chance, 0.0f, 1.0f);
+        ImGui::SetItemTooltip("Chance the sun shows faint granulation / soft banding.");
     }
 
     ImGui::Separator();
@@ -1076,8 +1084,34 @@ void redo(Editor& ed) {
 }
 
 // Write the scene to scenes/<name>.json and raise the confirmation popup.
+// Gather the editor-only authoring controls (Generate sliders, eclipse loop,
+// view prefs) so they can be persisted alongside the scene.
+EditorSettings editor_settings(const Editor& ed) {
+    EditorSettings s;
+    s.gen = ed.gen;
+    s.scene_seconds = ed.scene_seconds;
+    s.cam_loops = ed.cam_loops;
+    s.pal_transition = ed.pal_transition;
+    s.infinite_mode = ed.infinite_mode;
+    s.play_speed = ed.play_speed;
+    s.shade_mode = ed.shade_mode;
+    s.show_orbits = ed.show_orbits;
+    return s;
+}
+
+void apply_editor_settings(Editor& ed, const EditorSettings& s) {
+    ed.gen = s.gen;
+    ed.scene_seconds = s.scene_seconds;
+    ed.cam_loops = s.cam_loops;
+    ed.pal_transition = s.pal_transition;
+    ed.infinite_mode = s.infinite_mode;
+    ed.play_speed = s.play_speed;
+    ed.shade_mode = s.shade_mode;
+    ed.show_orbits = s.show_orbits;
+}
+
 void do_save(Editor& ed, const std::string& name) {
-    save_scene(ed.scene, scene_path(name));
+    save_scene(ed.scene, editor_settings(ed), scene_path(name));
     std::snprintf(ed.scene_file, sizeof(ed.scene_file), "%s", name.c_str());
     ed.dialog_verb = "Saved";
     ed.dialog_path = fs::absolute(scene_path(name)).string();
@@ -1087,8 +1121,10 @@ void do_save(Editor& ed, const std::string& name) {
 // Load scenes/<name>.json, replacing the scene. Forces a redraw so it shows.
 void do_load(Editor& ed, const std::string& name) {
     Scene loaded;
-    if (!load_scene(loaded, scene_path(name))) return;
+    EditorSettings settings;
+    if (!load_scene(loaded, settings, scene_path(name))) return;
     ed.scene = loaded;
+    apply_editor_settings(ed, settings);
     ed.selected = SEL_NONE;
     std::snprintf(ed.scene_file, sizeof(ed.scene_file), "%s", name.c_str());
     // A load starts a fresh undo history rooted at the loaded scene.
@@ -1197,7 +1233,8 @@ void draw_menu_bar(Editor& ed) {
             if (ImGui::MenuItem("Load...")) ed.want_load = true;
             ImGui::Separator();
             // Save the current scene as the startup default (loaded on next launch).
-            if (ImGui::MenuItem("Set as default")) save_scene(ed.scene, scene_path("default"));
+            if (ImGui::MenuItem("Set as default"))
+                save_scene(ed.scene, editor_settings(ed), scene_path("default"));
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
@@ -1583,10 +1620,13 @@ int main() {
 
     Editor ed;
     // Load the user's saved default if present, else the built-in starter scene.
-    if (load_scene(ed.scene, scene_path("default")))
+    EditorSettings default_settings;
+    if (load_scene(ed.scene, default_settings, scene_path("default"))) {
+        apply_editor_settings(ed, default_settings);
         std::snprintf(ed.scene_file, sizeof(ed.scene_file), "%s", "default");
-    else
+    } else {
         ed.scene = make_default_scene();
+    }
     ed.last_committed = scene_to_json(ed.scene);  // undo/redo baseline
 
     while (!glfwWindowShouldClose(window)) {

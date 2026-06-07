@@ -55,6 +55,16 @@ struct Clouds {
     std::vector<ColorStop> ramp; // field -> (color, alpha)
 };
 
+// Impact craters for airless rocky bodies: cellular (Worley) bowls scattered over
+// the surface — darker floor, bright raised rim — multiplied onto the base albedo.
+// No extra ray; sampled at the same un-spun body-local point as the surface texture.
+struct Craters {
+    bool  enabled = false;
+    float density = 4.0f;   // cell frequency: higher = more, smaller craters
+    float strength = 0.5f;  // contrast of floor-darkening / rim-brightening
+    int   seed = 0;
+};
+
 // Rocky-planet surface model: an elevation fbm thresholded into ocean vs. land,
 // with seasonal polar ice caps. When enabled it replaces the scalar field->ramp
 // path for the base albedo (gas giants keep using latitude bands instead). Land
@@ -98,6 +108,7 @@ struct Material {
     float warp = 0.0f;               // domain-warp amount (swirly bands)
     int   band_levels = 0;           // 0/1 = smooth bands; >1 = posterize into flat belts
     float turbulence = 0.0f;         // intra-belt zonal filament texture (0 = none)
+    float band_drift = 0.0f;         // gas-giant band-layer drift (extra revs/time; 0 = locked to spin)
     std::vector<ColorStop> tex_ramp; // colors the field maps through
 
     // Gas-giant storms: a few oval vortices (a guaranteed "great red spot" plus
@@ -107,6 +118,7 @@ struct Material {
     Vec3  storm_color{0.75f, 0.3f, 0.2f};
 
     Terrain terrain;                 // rocky planets: ocean/land + polar caps
+    Craters craters;                 // airless rocky bodies: impact-crater bowls
     Atmosphere atmosphere;           // Stage 6: faked limb glow
     Clouds clouds;                   // second translucent texture layer (spheres)
 };

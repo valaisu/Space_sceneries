@@ -84,6 +84,7 @@ struct SystemGenParams {
     float gas_belt_var = 0.8f;         // belt-width unevenness (center)
     float gas_turbulence = 0.6f;       // intra-belt filament amount (center)
     float gas_swirl = 0.15f;           // belt warp/swirl (center)
+    float gas_drift = 0.03f;           // band-layer drift speed, revs/sec (0 = static)
     // Spin & axial tilt (all planets):
     float spin_speed = 1.0f;           // rotation-speed multiplier (1 = default 3..10s)
     float axial_tilt = 22.0f;          // default max axial tilt, degrees
@@ -96,10 +97,30 @@ struct SystemGenParams {
     float frozen_chance = 0.15f;       // subset that are fully frozen worlds
     float season_chance = 0.60f;       // fraction of capped worlds with seasonal swing
     float cloud_chance = 0.60f;        // cloud chance (water worlds; dry = half)
+    float crater_chance = 0.70f;       // airless (no-atmosphere) rocky worlds/moons with craters
     // Feature chances:
     float ring_chance = 0.45f;         // gas giants with a ring (needs `rings`)
+    float ring_colors = 4.0f;          // ~number of radial color bands on a ring (center)
     float atmosphere_chance = 0.45f;   // planets with atmospheric glow (needs `atmospheres`)
     float moon_cap_chance = 0.40f;     // moons with polar caps
+    float sun_texture_chance = 0.40f;  // chance the sun shows faint granulation/banding
+};
+
+// Editor-only authoring controls that aren't part of the rendered Scene: the
+// Generate-tab sliders, the eclipse-loop knobs, and a few view preferences.
+// Persisted in the scene JSON's optional "editor" section so "Set as default"
+// and Save restore the full editing state; absent in older files (defaults used).
+struct EditorSettings {
+    SystemGenParams gen;        // the Generate tab
+    // Eclipse loop:
+    float scene_seconds = 30.0f;
+    int   cam_loops = 2;
+    int   pal_transition = 0;   // 0 = Morph, 1 = Snap
+    bool  infinite_mode = false;
+    // View preferences:
+    float play_speed = 1.0f;
+    ShadeMode shade_mode = ShadeMode::Lit;
+    bool  show_orbits = true;
 };
 
 // Replace `scene.bodies` with a freshly generated system (sun at body 0, then
@@ -125,12 +146,18 @@ void generate_eclipse_system(Scene& scene, const SystemGenParams& p,
                              float scene_seconds, int cam_loops);
 
 // Phase 3 / 5.2: JSON round-trip. Returns/accepts a pretty-printed JSON string.
+// The two-arg form embeds the editor settings under an "editor" key.
 std::string scene_to_json(const Scene& scene);
+std::string scene_to_json(const Scene& scene, const EditorSettings& settings);
 Scene scene_from_json(const std::string& text);
 
-// File helpers for the editor. Return false on I/O or parse failure.
+// File helpers for the editor. Return false on I/O or parse failure. The
+// EditorSettings overloads also persist/restore the "editor" section; the
+// scene-only overloads omit it on save (and ignore it on load).
 bool save_scene(const Scene& scene, const std::string& path);
 bool load_scene(Scene& out, const std::string& path);
+bool save_scene(const Scene& scene, const EditorSettings& settings, const std::string& path);
+bool load_scene(Scene& out, EditorSettings& settings, const std::string& path);
 
 // Palette library: a saved palette is just its list of colors (a reusable
 // post-process palette, independent of any scene). Return false on I/O/parse error.
