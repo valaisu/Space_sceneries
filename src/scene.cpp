@@ -756,6 +756,28 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
     scene.cam.vup = Vec3(0, 1, 0);
     scene.cam.look = CamLook::Target;
     scene.cam.target = planet_idx[fp];  // keep that planet framed
+
+    // Drop the hero's far-out moons that would loom right in front of the camera.
+    // The camera orbits the hero at scene.cam.orbit.radius; a moon orbiting the hero
+    // at radius mo passes between camera and planet at distance (cam_r - mo) (the
+    // worst case, when their planes align). A moon's apparent radius there is
+    // moon_radius / (cam_r - mo); requiring that clearance to exceed 10x the moon
+    // radius caps the moon at ~6 deg of apparent radius, so it reads as a small
+    // transit instead of hiding the planet. Closer-in moons (small clearance ratio)
+    // are unaffected; only the ones that would fill the frame are removed. Moons sit
+    // at the tail of scene.bodies and nothing parents to them, so erasing is
+    // index-safe for the sun/planet/ring/camera-target indices that precede them.
+    int hero_body = planet_idx[fp];
+    float cam_r = scene.cam.orbit.radius;
+    scene.bodies.erase(
+        std::remove_if(scene.bodies.begin(), scene.bodies.end(),
+                       [&](const Body& b) {
+                           if (!b.orbit.active || b.orbit.parent != hero_body) return false;
+                           auto s = std::dynamic_pointer_cast<Sphere>(b.shape);
+                           if (!s) return false;  // keep rings (radius-0 attachments)
+                           return (cam_r - b.orbit.radius) < 10.0f * s->radius;
+                       }),
+        scene.bodies.end());
 }
 
 void generate_eclipse_system(Scene& scene, const SystemGenParams& p,
