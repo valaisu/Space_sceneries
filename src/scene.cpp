@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iterator>
@@ -131,7 +132,15 @@ json to_json(const Background& b) {
                 {"brightness", b.brightness}, {"size", b.size},
                 {"tint", to_json(b.tint)}, {"color_variation", b.color_variation},
                 {"seed", b.seed}, {"region_scale", b.region_scale},
-                {"region_strength", b.region_strength}, {"region_glow", b.region_glow}};
+                {"region_strength", b.region_strength}, {"region_glow", b.region_glow},
+                {"region_star_boost", b.region_star_boost},
+                {"band_enabled", b.band_enabled}, {"band_normal", to_json(b.band_normal)},
+                {"band_width", b.band_width}, {"band_density", b.band_density},
+                {"band_glow", b.band_glow}, {"band_tint", to_json(b.band_tint)},
+                {"shoot_enabled", b.shoot_enabled}, {"shoot_rate", b.shoot_rate},
+                {"shoot_speed", b.shoot_speed}, {"shoot_length", b.shoot_length},
+                {"shoot_size", b.shoot_size}, {"shoot_brightness", b.shoot_brightness},
+                {"shoot_seed", b.shoot_seed}};
 }
 
 Background background_from_json(const json& j) {
@@ -146,6 +155,20 @@ Background background_from_json(const json& j) {
     b.region_scale = j.value("region_scale", b.region_scale);
     b.region_strength = j.value("region_strength", b.region_strength);
     b.region_glow = j.value("region_glow", b.region_glow);
+    b.region_star_boost = j.value("region_star_boost", b.region_star_boost);
+    b.band_enabled = j.value("band_enabled", b.band_enabled);
+    if (j.contains("band_normal")) b.band_normal = vec3_from_json(j.at("band_normal"));
+    b.band_width = j.value("band_width", b.band_width);
+    b.band_density = j.value("band_density", b.band_density);
+    b.band_glow = j.value("band_glow", b.band_glow);
+    if (j.contains("band_tint")) b.band_tint = vec3_from_json(j.at("band_tint"));
+    b.shoot_enabled = j.value("shoot_enabled", b.shoot_enabled);
+    b.shoot_rate = j.value("shoot_rate", b.shoot_rate);
+    b.shoot_speed = j.value("shoot_speed", b.shoot_speed);
+    b.shoot_length = j.value("shoot_length", b.shoot_length);
+    b.shoot_size = j.value("shoot_size", b.shoot_size);
+    b.shoot_brightness = j.value("shoot_brightness", b.shoot_brightness);
+    b.shoot_seed = j.value("shoot_seed", b.shoot_seed);
     return b;
 }
 
@@ -182,7 +205,8 @@ PostProcess post_from_json(const json& j) {
 
 json to_json(const Orbit& o) {
     return json{{"active", o.active}, {"parent", o.parent}, {"radius", o.radius},
-                {"period", o.period}, {"phase", o.phase}, {"normal", to_json(o.normal)}};
+                {"period", o.period}, {"phase", o.phase}, {"normal", to_json(o.normal)},
+                {"eccentricity", o.eccentricity}};
 }
 
 Orbit orbit_from_json(const json& j) {
@@ -193,6 +217,7 @@ Orbit orbit_from_json(const json& j) {
     o.period = j.value("period", 10.0f);
     o.phase = j.value("phase", 0.0f);
     if (j.contains("normal")) o.normal = vec3_from_json(j.at("normal"));
+    o.eccentricity = j.value("eccentricity", 0.0f);
     return o;
 }
 
@@ -243,21 +268,37 @@ Body body_from_json(const json& j) {
     return b;
 }
 
-// Offset from the orbit center for an explicit angle, in the orbital plane.
-Vec3 orbit_offset_at(const Orbit& o, float ang) {
+// Offset from the parent (which sits at a focus) for an explicit eccentric anomaly
+// E, in the orbital plane. With eccentricity 0 this is a circle of radius `radius`
+// and E is just the angle — reproducing the old circular orbit exactly.
+Vec3 orbit_offset_at(const Orbit& o, float E) {
     Vec3 n = normalize(o.normal);
     // Build an orthonormal basis (u, v) spanning the orbital plane.
     Vec3 ref = (std::fabs(n.x) > 0.9f) ? Vec3(0, 0, 1) : Vec3(1, 0, 0);
     Vec3 u = normalize(cross(ref, n));
     Vec3 v = cross(n, u);
-    return (u * std::cos(ang) + v * std::sin(ang)) * o.radius;
+    float a = o.radius;
+    float e = std::clamp(o.eccentricity, 0.0f, 0.99f);
+    // Ellipse with the focus at the origin: x = a(cosE - e), y = b sinE.
+    float x = a * (std::cos(E) - e);
+    float y = a * std::sqrt(1.0f - e * e) * std::sin(E);
+    return u * x + v * y;
 }
 
-// Position offset from the orbit center at time t, in the orbital plane.
+// Position offset from the parent at time t. The mean anomaly advances uniformly;
+// solving Kepler's equation for the eccentric anomaly gives the equal-area motion
+// (faster at periapsis). e = 0 collapses to the uniform circular case.
 Vec3 orbit_offset(const Orbit& o, float t) {
     constexpr float TWO_PI = 6.28318530717958647692f;
     float w = (o.period != 0.0f) ? (TWO_PI / o.period) : 0.0f;
-    return orbit_offset_at(o, o.phase + w * t);
+    float M = o.phase + w * t;                       // mean anomaly
+    float e = std::clamp(o.eccentricity, 0.0f, 0.99f);
+    float E = M;                                     // eccentric anomaly (Newton solve)
+    for (int i = 0; i < 6; ++i) {
+        float f = E - e * std::sin(E) - M;
+        E -= f / (1.0f - e * std::cos(E));
+    }
+    return orbit_offset_at(o, E);
 }
 
 }  // namespace
@@ -406,6 +447,30 @@ bool load_scene(Scene& out, const std::string& path) {
                      std::istreambuf_iterator<char>());
     try {
         out = scene_from_json(text);
+    } catch (const std::exception&) {
+        return false;
+    }
+    return true;
+}
+
+bool save_palette(const std::vector<Vec3>& palette, const std::string& path) {
+    json colors = json::array();
+    for (const auto& c : palette) colors.push_back(to_json(c));
+    std::ofstream f(path);
+    if (!f) return false;
+    f << json{{"palette", colors}}.dump(2);
+    return static_cast<bool>(f);
+}
+
+bool load_palette(std::vector<Vec3>& out, const std::string& path) {
+    std::ifstream f(path);
+    if (!f) return false;
+    std::string text((std::istreambuf_iterator<char>(f)),
+                     std::istreambuf_iterator<char>());
+    try {
+        json j = json::parse(text);
+        out.clear();
+        for (const auto& c : j.at("palette")) out.push_back(vec3_from_json(c));
     } catch (const std::exception&) {
         return false;
     }

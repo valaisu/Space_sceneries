@@ -29,6 +29,26 @@ struct Background {
     float region_scale = 2.0f;      // region feature size (lower = broader patches)
     float region_strength = 0.5f;   // how strongly regions modulate local star density
     float region_glow = 0.0f;       // additive haze in dense regions (0 = off)
+    float region_star_boost = 0.0f; // extra star density + brightness inside dense regions
+
+    // Galactic band ("Milky Way"): a great-circle band — a non-noise pattern — that
+    // concentrates stars and a tinted haze along the plane perpendicular to band_normal.
+    bool band_enabled = false;
+    Vec3 band_normal{0, 1, 0};       // pole of the band; the band is the equator of this
+    float band_width = 0.25f;        // angular half-width of the band (|cos| from equator)
+    float band_density = 0.5f;       // extra star density along the band center
+    float band_glow = 0.06f;         // additive haze along the band (0 = off)
+    Vec3 band_tint{0.80f, 0.85f, 1.0f};
+
+    // Shooting stars: brief animated streaks with a fading tail. Time-driven, so they
+    // only move while the timeline plays. Deterministic from shoot_seed.
+    bool shoot_enabled = false;
+    float shoot_rate = 1.5f;         // streak spawns per second
+    float shoot_speed = 1.2f;        // head angular speed (radians/s)
+    float shoot_length = 0.18f;      // tail length (radians)
+    float shoot_size = 0.012f;       // streak thickness (radians)
+    float shoot_brightness = 1.4f;   // streak intensity
+    int shoot_seed = 99;
 };
 
 // Stage 5: a single light. Directional lights model the old sun -> scene fill;
@@ -56,13 +76,15 @@ bool hit_world(const World& world, const Ray& r, float t_min, float t_max, HitRe
 Vec3 atmosphere_glow(const Atmosphere& a, Vec3 normal, Vec3 view_dir, Vec3 to_light);
 
 // Phase 2 / 4.4 + Stage 2: color for a ray that hits nothing — the starfield.
-Vec3 background(const Ray& r, const Background& bg = Background{});
+// `time` drives animated elements (shooting stars); pass 0 for a static sky.
+Vec3 background(const Ray& r, const Background& bg = Background{}, float time = 0.0f);
 
 // Phase 2 / 4.3 + Stage 5: shade a primary ray against a set of lights. Emissive
 // surfaces return their albedo; others get ambient floor + summed diffuse, each
 // light optionally shadow-tested. Misses return the starfield described by `bg`.
 Vec3 ray_color(const Ray& r, const World& world, const std::vector<Light>& lights,
-               float ambient, bool shadows, const Background& bg = Background{});
+               float ambient, bool shadows, const Background& bg = Background{},
+               float time = 0.0f);
 
 // Small standalone previews for the editor panels — neutral lighting, no shadows,
 // no post-process, so the surface texture / sky read true. RGBA8, one uint32_t per

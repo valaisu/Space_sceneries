@@ -62,6 +62,11 @@ Scene scene_from_json(const std::string& text);
 bool save_scene(const Scene& scene, const std::string& path);
 bool load_scene(Scene& out, const std::string& path);
 
+// Palette library: a saved palette is just its list of colors (a reusable
+// post-process palette, independent of any scene). Return false on I/O/parse error.
+bool save_palette(const std::vector<Vec3>& palette, const std::string& path);
+bool load_palette(std::vector<Vec3>& out, const std::string& path);
+
 // Phase 6: world-space position of body `i` at time `t`, resolving orbit + parent
 // chain. Stationary bodies return their authored center.
 Vec3 body_world_pos(const Scene& scene, int i, float t);

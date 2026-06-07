@@ -38,6 +38,50 @@ float vnoise(Vec3 p) {
 float fbm2(Vec3 p) {
     return 0.6667f * vnoise(p) + 0.3333f * vnoise(p * 2.03f + Vec3(11, 17, 23));
 }
+
+// Animated shooting stars: a few deterministic streaks that sweep a great-circle
+// arc with a fading tail. `dir` is the (normalized) view direction. Additive.
+Vec3 shooting_stars(Vec3 dir, const Background& bg, float time) {
+    if (!bg.shoot_enabled || bg.shoot_rate <= 0.0f) return Vec3(0, 0, 0);
+    constexpr float LIFE = 1.0f;          // seconds a streak stays visible
+    const float interval = 1.0f / bg.shoot_rate;
+    const float thick = std::max(1e-4f, bg.shoot_size);
+    Vec3 acc(0, 0, 0);
+
+    // A streak spawns every `interval` seconds; check the few whose lifetimes can
+    // overlap `time` (current index back far enough to cover LIFE).
+    int kcur = static_cast<int>(std::floor(time / interval));
+    int span = static_cast<int>(LIFE / interval) + 1;
+    for (int k = kcur; k >= kcur - span; --k) {
+        float age = time - (k * interval);
+        if (age < 0.0f || age > LIFE) continue;
+
+        // Deterministic start direction A and a perpendicular great-circle axis.
+        Vec3 h = hash33(Vec3(static_cast<float>(k) + bg.shoot_seed * 1.7f, 4.2f, 9.1f));
+        Vec3 A = normalize(h * 2.0f - Vec3(1, 1, 1));
+        Vec3 h2 = hash33(Vec3(7.3f, static_cast<float>(k) - bg.shoot_seed * 0.9f, 1.1f));
+        Vec3 axis = normalize(cross(A, h2 * 2.0f - Vec3(1, 1, 1)));
+
+        float head_ang = age * bg.shoot_speed;
+        float life_fade = std::min(1.0f, (LIFE - age) * 4.0f);  // fade out near end
+        // Sample down the tail; the head is brightest, the tail dims and the streak
+        // only exists where it has already swept (back_ang >= 0).
+        constexpr int NT = 12;
+        float best = 0.0f;
+        for (int j = 0; j < NT; ++j) {
+            float tj = static_cast<float>(j) / (NT - 1);
+            float back_ang = head_ang - tj * bg.shoot_length;
+            if (back_ang < 0.0f) break;
+            Vec3 P = rotate_about(A, axis, back_ang);
+            float c = std::clamp(dot(dir, P), -1.0f, 1.0f);
+            float ang = std::acos(c);
+            float w = std::exp(-(ang * ang) / (thick * thick));  // round cross-section
+            best = std::max(best, w * (1.0f - tj));
+        }
+        acc = acc + Vec3(1, 1, 1) * (best * life_fade * bg.shoot_brightness);
+    }
+    return acc;
+}
 }  // namespace
 
 bool hit_world(const World& world, const Ray& r, float t_min, float t_max, HitRecord& rec) {
@@ -79,7 +123,7 @@ Vec3 atmosphere_glow(const Atmosphere& a, Vec3 normal, Vec3 view_dir, Vec3 to_li
     return col * (rim * visibility * a.intensity);
 }
 
-Vec3 background(const Ray& r, const Background& bg) {
+Vec3 background(const Ray& r, const Background& bg, float time) {
     // Project the ray direction onto a 3D grid; each cell may hold one star.
     // Sampling by direction (not UV) avoids pole pinching.
     constexpr float FREQ = 60.0f;     // grid resolution; finer = smaller cells
@@ -91,7 +135,21 @@ Vec3 background(const Ray& r, const Background& bg) {
     // Large-scale regions modulate local star density (darker/denser areas).
     float region = fbm2(dir * std::max(0.05f, bg.region_scale) + seed_off * 0.01f);
     float dfactor = 1.0f + bg.region_strength * (region - 0.5f) * 2.0f;
-    float local_density = std::clamp(bg.density * dfactor, 0.0f, 1.0f);
+    float region_hi = smoothstep01(0.55f, 1.0f, region);  // how deep into a dense region
+
+    // Galactic band: a great-circle (the equator of band_normal). band_t is 1 at the
+    // band center, falling to 0 at its edge.
+    float band_t = 0.0f;
+    if (bg.band_enabled) {
+        float c = std::fabs(dot(dir, normalize(bg.band_normal)));  // 0 on the band, 1 at poles
+        band_t = 1.0f - smoothstep01(0.0f, std::max(0.01f, bg.band_width), c);
+    }
+
+    // Stars cluster in dense regions and along the band; brighten them there too.
+    float local_density = std::clamp(bg.density * dfactor
+                                     + bg.region_star_boost * region_hi
+                                     + bg.band_density * band_t, 0.0f, 1.0f);
+    float bright_boost = 1.0f + bg.region_star_boost * region_hi + bg.band_density * band_t;
     float radius = std::max(0.01f, bg.size);
 
     // Scan the 3x3x3 neighborhood so a fully-jittered star near a cell edge isn't
@@ -110,7 +168,7 @@ Vec3 background(const Ray& r, const Background& bg) {
                 Vec3 star = cell + r2;  // full-cell jitter -> no lattice rows
                 float dist = length(p - star);
                 float core = std::max(0.0f, 1.0f - dist / radius);
-                float intensity = core * core * bg.brightness * (0.4f + 0.6f * r1.y);
+                float intensity = core * core * bg.brightness * bright_boost * (0.4f + 0.6f * r1.y);
                 if (intensity > best) {
                     best = intensity;
                     float cv = (r1.z - 0.5f) * 2.0f * bg.color_variation;
@@ -120,17 +178,21 @@ Vec3 background(const Ray& r, const Background& bg) {
 
     Vec3 col = bg.sky;
     if (bg.region_glow > 0.0f)  // faint additive haze in the densest regions
-        col = col + bg.tint * (bg.region_glow * smoothstep01(0.55f, 1.0f, region));
-    return col + best_tint * best;
+        col = col + bg.tint * (bg.region_glow * region_hi);
+    if (bg.band_enabled && bg.band_glow > 0.0f)  // tinted haze along the galactic band
+        col = col + bg.band_tint * (bg.band_glow * band_t);
+    col = col + best_tint * best;
+    col = col + shooting_stars(dir, bg, time);
+    return col;
 }
 
 Vec3 ray_color(const Ray& r, const World& world, const std::vector<Light>& lights,
-               float ambient, bool shadows, const Background& bg) {
+               float ambient, bool shadows, const Background& bg, float time) {
     constexpr float EPS = 1e-3f;       // shadow-acne offset (4.3)
 
     HitRecord rec;
     if (!hit_world(world, r, EPS, 1e30f, rec))
-        return background(r, bg);
+        return background(r, bg, time);
 
     // Emissive surfaces ignore lighting/shadows (sun, self-lit bodies). (3.4)
     if (rec.material.emissive)
@@ -247,7 +309,7 @@ void render_view(const Scene& scene, const Camera& cam, float time,
         for (int x = 0; x < w; ++x) {
             float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(w);
             Vec3 color = ray_color(cam.get_ray(u, v), world, lights, AMBIENT,
-                                   shadows, scene.background);
+                                   shadows, scene.background, time);
             out[static_cast<size_t>(y) * w + x] = pack_rgba(color);
         }
     }

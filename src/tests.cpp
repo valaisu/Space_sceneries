@@ -228,6 +228,72 @@ static void phase6() {
     assert(w.size() == 3);
 }
 
+static void kepler_orbit() {
+    // Elliptic orbit: semi-major a=4, e=0.5, XZ plane (default normal), parent at a
+    // focus. Periapsis (t=0, phase 0) is the near point at +Z*a(1-e); half a period
+    // later is apoapsis at -Z*a(1+e).
+    Scene scene;
+    auto p = std::make_shared<Sphere>(Vec3(0, 0, 0), 0.5f, Material{Vec3(0, 0, 1), false});
+    Body planet{p};
+    planet.orbit.active = true;
+    planet.orbit.parent = -1;
+    planet.orbit.radius = 4.0f;
+    planet.orbit.period = 8.0f;
+    planet.orbit.eccentricity = 0.5f;
+    scene.bodies = {planet};
+
+    Vec3 peri = body_world_pos(scene, 0, 0.0f);
+    assert(approx(peri.x, 0.0f) && approx(peri.z, 2.0f));   // a(1-e) = 4*0.5
+    Vec3 apo = body_world_pos(scene, 0, 4.0f);
+    assert(approx(apo.x, 0.0f) && approx(apo.z, -6.0f));    // a(1+e) = 4*1.5
+    assert(length(peri) < length(apo));                     // periapsis is closer
+
+    // Equal-area motion: starting at periapsis (fast), a quarter period sweeps PAST
+    // the 90 degrees mark a circle would reach (+X, z=0) — so z has gone negative.
+    Vec3 q = body_world_pos(scene, 0, 2.0f);
+    assert(q.x > 0.0f && q.z < 0.0f);
+
+    // e = 0 reproduces the circular orbit (and round-trips through JSON).
+    planet.orbit.eccentricity = 0.0f;
+    scene.bodies = {planet};
+    Vec3 c0 = body_world_pos(scene, 0, 0.0f);
+    assert(approx(c0.z, 4.0f) && approx(c0.x, 0.0f));
+    Scene back = scene_from_json(scene_to_json(scene));
+    assert(approx(back.bodies[0].orbit.eccentricity, 0.0f));
+    Scene s2;
+    s2.bodies = {planet};
+    s2.bodies[0].orbit.eccentricity = 0.5f;
+    Scene b2 = scene_from_json(scene_to_json(s2));
+    assert(approx(b2.bodies[0].orbit.eccentricity, 0.5f));
+}
+
+static void file_io() {
+    // Palette library round-trips through disk.
+    std::vector<Vec3> pal{Vec3(0.1f, 0.2f, 0.3f), Vec3(1, 0, 0.5f), Vec3(0, 0.8f, 0.4f)};
+    const char* ppath = "test_palette.json";
+    assert(save_palette(pal, ppath));
+    std::vector<Vec3> back;
+    assert(load_palette(back, ppath));
+    assert(back.size() == 3 && approx(back[1].x, 1.0f) && approx(back[2].y, 0.8f));
+    std::remove(ppath);
+
+    // New Background fields (galactic band + shooting stars) survive scene JSON.
+    Scene s;
+    s.background.band_enabled = true;
+    s.background.band_width = 0.33f;
+    s.background.band_density = 0.7f;
+    s.background.region_star_boost = 0.4f;
+    s.background.shoot_enabled = true;
+    s.background.shoot_rate = 2.5f;
+    s.background.shoot_seed = 42;
+    Scene r = scene_from_json(scene_to_json(s));
+    assert(r.background.band_enabled && approx(r.background.band_width, 0.33f) &&
+           approx(r.background.band_density, 0.7f));
+    assert(approx(r.background.region_star_boost, 0.4f));
+    assert(r.background.shoot_enabled && approx(r.background.shoot_rate, 2.5f) &&
+           r.background.shoot_seed == 42);
+}
+
 static void phase7() {
     // project() must be the exact inverse of get_ray() so overlays align with the
     // raytraced image.
@@ -631,6 +697,8 @@ int main() {
     phase3();
     phase5();
     phase6();
+    kepler_orbit();
+    file_io();
     phase7();
     phase9();
     phase10();
@@ -640,6 +708,6 @@ int main() {
     lighting();
     atmosphere();
     postprocess();
-    std::printf("Phase 1-3,5,6,7,9,10 + ring ramp + starfield + texture + lighting + atmosphere + post checks passed.\n");
+    std::printf("Phase 1-3,5,6,7,9,10 + kepler + file io + ring ramp + starfield + texture + lighting + atmosphere + post checks passed.\n");
     return 0;
 }

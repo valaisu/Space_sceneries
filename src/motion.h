@@ -12,10 +12,13 @@
 struct Orbit {
     bool active = false;
     int parent = -1;       // index into Scene::bodies, or -1 for the world origin
-    float radius = 5.0f;
+    float radius = 5.0f;   // semi-major axis (a); the orbit radius when eccentricity = 0
     float period = 10.0f;  // seconds per revolution
-    float phase = 0.0f;    // starting angle, radians
+    float phase = 0.0f;    // mean-anomaly offset at t = 0, radians
     Vec3 normal{0, 1, 0};  // orbital-plane normal; tilt this for inclined orbits
+    // Kepler eccentricity (0 = circle). The parent sits at a focus and the body
+    // moves faster at periapsis (equal-area). 0 reproduces the old circular orbit.
+    float eccentricity = 0.0f;
 };
 
 // Self-rotation about `axis`. Stored now; becomes visible once spheres are
