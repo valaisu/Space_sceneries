@@ -96,7 +96,15 @@ struct Material {
     float band_freq = 6.0f;          // number of latitude bands
     float band_var = 0.0f;           // unevenness of band widths (0 = uniform stripes)
     float warp = 0.0f;               // domain-warp amount (swirly bands)
+    int   band_levels = 0;           // 0/1 = smooth bands; >1 = posterize into flat belts
+    float turbulence = 0.0f;         // intra-belt zonal filament texture (0 = none)
     std::vector<ColorStop> tex_ramp; // colors the field maps through
+
+    // Gas-giant storms: a few oval vortices (a guaranteed "great red spot" plus
+    // hash-placed smaller ovals), elongated east-west, blended toward storm_color.
+    float storm = 0.0f;              // overall storm strength/coverage (0 = none)
+    int   storm_seed = 0;            // placement seed
+    Vec3  storm_color{0.75f, 0.3f, 0.2f};
 
     Terrain terrain;                 // rocky planets: ocean/land + polar caps
     Atmosphere atmosphere;           // Stage 6: faked limb glow

@@ -72,6 +72,34 @@ struct SystemGenParams {
     bool  atmospheres = true;   // allow atmospheric glow on some planets
     float gas_ratio = 0.5f;     // ~fraction of planets that are gas giants (0 = all rocky)
     int   hero_kind = 0;        // reframe target: 0 = prefer gas giant, 1 = rocky, 2 = gas
+
+    // --- Appearance / probability knobs. Defaults reproduce the previous hardcoded
+    // behaviour. "chance" values are probabilities in [0,1]; the rest are centers
+    // that the generator jitters per-body so variety is preserved. These apply to
+    // both Generate and every eclipse-loop cycle (the loop calls generate_system).
+    // Gas giants:
+    float gas_storm_chance = 0.34f;    // fraction with an oval storm
+    float gas_storm_strength = 0.78f;  // storm opacity (center)
+    float gas_belt_count = 7.0f;       // ~number of latitude belts (band_freq center)
+    float gas_belt_var = 0.8f;         // belt-width unevenness (center)
+    float gas_turbulence = 0.6f;       // intra-belt filament amount (center)
+    float gas_swirl = 0.15f;           // belt warp/swirl (center)
+    // Spin & axial tilt (all planets):
+    float spin_speed = 1.0f;           // rotation-speed multiplier (1 = default 3..10s)
+    float axial_tilt = 22.0f;          // default max axial tilt, degrees
+    float extreme_tilt_chance = 0.08f; // chance of a Uranus-like ~90 deg tilt
+    // Terrestrials:
+    float water_chance = 0.55f;        // fraction that are water worlds (else dry/desert)
+    float exotic_chance = 0.30f;       // fraction with an alien (non-Earth) hue family
+    float biome_chance = 0.80f;        // fraction with posterized crisp biome bands
+    float cap_chance = 0.80f;          // fraction with visible polar ice caps
+    float frozen_chance = 0.15f;       // subset that are fully frozen worlds
+    float season_chance = 0.60f;       // fraction of capped worlds with seasonal swing
+    float cloud_chance = 0.60f;        // cloud chance (water worlds; dry = half)
+    // Feature chances:
+    float ring_chance = 0.45f;         // gas giants with a ring (needs `rings`)
+    float atmosphere_chance = 0.45f;   // planets with atmospheric glow (needs `atmospheres`)
+    float moon_cap_chance = 0.40f;     // moons with polar caps
 };
 
 // Replace `scene.bodies` with a freshly generated system (sun at body 0, then
