@@ -25,6 +25,9 @@ the final image toward deliberate pixel-art color.
 - **A pixel-art look** — generated HSV palettes (harmonic schemes — monochromatic,
   complementary, triadic, analogous, or hand-anchored — saveable to a reusable library)
   with dithering, applied identically to the viewport and the exported PNG.
+- **An infinite eclipse loop** — an "Infinite mode" that opens on a planet eclipsing
+  its sun, reveals the system as it plays, then silently regenerates a whole new system
+  at each eclipse (with a morphing palette), so the scene renews itself forever.
 
 ## Build & run
 

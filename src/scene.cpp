@@ -475,6 +475,83 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
     scene.cam.target = planet_idx[fp];  // keep that planet framed
 }
 
+void generate_eclipse_system(Scene& scene, const SystemGenParams& p,
+                             float scene_seconds, int cam_loops) {
+    constexpr float PI = 3.14159265358979323846f;
+    float T = std::max(1.0f, scene_seconds);
+    int N = std::max(1, cam_loops);  // camera revolutions per cycle
+
+    // Bias toward a more spread-out, tilted system so fewer planets crowd the view
+    // and read as fully dark (issue: too many whole-planet shadows). Floors only —
+    // the user can still push spacing/tilt higher from the Generate tab.
+    SystemGenParams q = p;
+    q.spacing = std::max(p.spacing, 1.8f);
+    q.inclination = std::max(p.inclination, 0.4f);
+    generate_system(scene, q);  // reuse all the body/texture/ring/moon generation
+
+    // Shrink the inner planets (small near the sun, full size out where the
+    // foreground gas giant lives). Planets are the non-emissive spheres orbiting
+    // the sun (body 0), pushed in orbit order, so index fraction = how far out.
+    std::vector<int> planets;
+    for (int i = 1; i < static_cast<int>(scene.bodies.size()); ++i)
+        if (scene.bodies[i].orbit.parent == 0)
+            if (auto s = std::dynamic_pointer_cast<Sphere>(scene.bodies[i].shape))
+                if (!s->material.emissive) planets.push_back(i);
+    int np = static_cast<int>(planets.size());
+    for (int k = 0; k < np; ++k) {
+        float frac = (np > 1) ? static_cast<float>(k) / (np - 1) : 1.0f;
+        auto s = std::dynamic_pointer_cast<Sphere>(scene.bodies[planets[k]].shape);
+        s->radius *= 0.6f + 0.4f * frac;  // inner 0.6x .. outer 1.0x
+    }
+
+    int fg = scene.cam.orbit.parent;  // the planet generate_system chose to orbit
+    if (fg < 1 || fg >= static_cast<int>(scene.bodies.size())) return;
+
+    float r_fg = 1.0f;
+    if (auto s = std::dynamic_pointer_cast<Sphere>(scene.bodies[fg].shape))
+        r_fg = s->radius;
+    float R = scene.bodies[fg].orbit.radius;  // planet orbit radius
+    float camdist = 6.0f * r_fg;
+
+    // Hidden sun: keep its angular size well under the planet's. With camdist = 6r,
+    // R/8 is comfortably inside r_fg * (R + camdist) / camdist.
+    if (auto sun = std::dynamic_pointer_cast<Sphere>(scene.bodies[0].shape))
+        sun->radius = std::min(sun->radius, R / 8.0f);
+
+    // Foreground planet onto a circular, coplanar orbit so at t = 0 it sits at
+    // (0,0,-R): with e = 0 and normal +Y, orbit_offset_at gives (a sinE, 0, a cosE),
+    // so phase (= E at t=0) = PI -> (0,0,-R). It does cam_loops-1 orbits per cycle,
+    // so camera and anti-sun realign exactly once per cycle (one eclipse). With
+    // cam_loops == 1 the planet is parked at (0,0,-R) (pure camera orbit, no sun
+    // motion — the calmest sweep).
+    Orbit& po = scene.bodies[fg].orbit;
+    if (N >= 2) {
+        po.active = true;
+        po.eccentricity = 0.0f;
+        po.normal = Vec3(0, 1, 0);
+        po.phase = PI;
+        po.period = T / (N - 1);
+    } else {
+        po.active = false;
+        scene.bodies[fg].shape->center = Vec3(0, 0, -R);
+    }
+
+    // Camera orbits the planet in the same plane, cam_loops revolutions per cycle,
+    // at a fixed distance + FOV so the framing repeats identically every eclipse.
+    SceneCamera& c = scene.cam;
+    c.orbit.active = true;
+    c.orbit.parent = fg;
+    c.orbit.eccentricity = 0.0f;
+    c.orbit.normal = Vec3(0, 1, 0);
+    c.orbit.phase = PI;                      // eye at (0,0,-camdist) relative to planet
+    c.orbit.radius = camdist;
+    c.orbit.period = T / N;
+    c.vup = Vec3(0, 1, 0);
+    c.fov = 50.0f;
+    c.look = CamLook::Target;
+    c.target = fg;
+}
+
 std::string scene_to_json(const Scene& scene) {
     json bodies = json::array();
     for (const auto& b : scene.bodies)
