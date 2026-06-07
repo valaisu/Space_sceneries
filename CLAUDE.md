@@ -11,8 +11,8 @@ This file is the coarse, up-to-date map of the project.
 
 ## Build & run
 
-GLFW and OpenGL come from the system; `nlohmann/json`, Dear ImGui, and
-`stb_image_write` are vendored in `third_party/`.
+GLFW and OpenGL come from the system; `nlohmann/json`, Dear ImGui,
+`stb_image_write`, and `gif.h` (animated-GIF writer) are vendored in `third_party/`.
 
 ```bash
 cmake -S . -B build        # first time / after CMakeLists or file-list changes
@@ -22,7 +22,8 @@ cmake --build build -j     # after editing code
 ```
 
 The editor keeps files in project subfolders (created on startup): saved scenes in
-`scenes/*.json`, saved palettes in `palettes/*.json`, exported PNGs in `renders/*.png`.
+`scenes/*.json`, saved palettes in `palettes/*.json`, exported PNGs **and animated
+GIFs** in `renders/` (`*.png` / `*.gif`).
 Only `scenes/default.json` (the base scene loaded on launch) is tracked; the rest is
 gitignored. The editor needs a display; the tests do not.
 
@@ -34,7 +35,8 @@ build, configure a separate tree explicitly: `-DCMAKE_BUILD_TYPE=Debug` (slower)
 ## Layout
 
 - `src/` — all first-party code.
-- `third_party/` — vendored single-header / drop-in deps (nlohmann json, imgui, stb).
+- `third_party/` — vendored single-header / drop-in deps (nlohmann json, imgui, stb,
+  `gif.h` — a minimal self-contained animated-GIF89a writer used for animation export).
 - `build/` — CMake output (gitignored).
 
 ### Source-file map (`src/`)
@@ -228,7 +230,14 @@ no longer face away from the sun). Orbits are near-coplanar (small `inclination`
 *worst-case* clearance to either neighbouring orbit (computed from their perihelion/
 aphelion edges) — strictly less than half the gap — so a moon is always closer to its
 parent than to any other planet or the sun. That invariant is unit-tested (`system_gen`
-in tests.cpp). Moons also start outside the planet's radius and any ring. The gen
+in tests.cpp). Moons also start outside the planet's radius and any ring. **No moon
+looms over the closeup:** after the camera is reframed to orbit the hero planet,
+`generate_system` erases the hero's moons whose camera clearance `cam_r − orbit_radius`
+(the worst-case front-crossing distance, planes aligned) is under `10 ×` the moon
+radius — i.e. any moon that would fill the frame and hide the planet; small close-in
+transiting moons are kept (rings, being radius-0 disk attachments, are never erased,
+and erasing tail-of-vector moons keeps sun/planet/ring/camera-target indices valid).
+This carries into the eclipse loop, which reuses the same hero. The gen
 params (`SystemGenParams`) are editor authoring controls, not part of `Scene`, but they
 **are** persisted: save/"Set as default" writes them (plus the eclipse-loop knobs and a few
 view prefs) under the scene JSON's optional **`editor`** section via the `EditorSettings`
@@ -318,11 +327,24 @@ view-pivot crosshair, and a corner **X/Y/Z axis gizmo**. Orbit paths are an edit
 aid: hidden through the render camera and toggleable via View ▸ "Show orbits".
 **R/S** are still modal Blender transforms (rotate/scale) — move the mouse,
 left-click/Enter to confirm, right-click/Esc to cancel. The Timeline has Play/Pause
-(also **Space**), speed, and a time scrubber; while playing, `time` advances by frame
-delta so orbits and spin animate. View ▸ "Look through camera" (also **`0`**) renders
+(also **Space**), speed, a time scrubber, **editable output W/H fields + resolution
+presets** (write `scene.width`/`height`, which feed the render-camera aspect and every
+export), and **Export PNG** / **Export GIF…** buttons; while playing, `time` advances
+by frame delta so orbits and spin animate. **`F` toggles fullscreen** (`F`/`Esc` exit):
+fullscreen hides all panels/overlays and shows only the raytraced scene, centered and
+**black-letterboxed** to the output aspect ratio (`draw_fullscreen`); `Space`/`N`/`0`
+still work there. View ▸ "Look through camera" (also **`0`**) renders
 from the scene's render camera; View ▸ "Display mode" picks the viewport `ShadeMode`
 (Direction / In-between / Lit); Export PNG renders the render camera at full
-resolution to `renders/` (always Lit). The **File** menu drives modal **Save As…** /
+resolution to `renders/<name>.png` (always Lit). **Export GIF…** opens a dialog
+(name → `renders/<name>.gif`, FPS, and a length mode — **By duration** sweeps `time`
+over N seconds of the current scene, or **By loop cycles** renders N full eclipse loops,
+regenerating the system + morphing the palette at each eclipse exactly like live Infinite
+mode). The export runs **incrementally** (`start_export`/`step_export`/`finish_export`):
+`step_export` renders a ~80 ms time-budgeted batch of frames per UI frame so the window
+stays responsive (a blocking loop made the OS flag it "not responding") and shows a
+progress bar + live preview + **Cancel** (cancel discards the partial gif); the editor is
+snapshotted on start and fully restored on finish/cancel. The **File** menu drives modal **Save As…** /
 **Load…** dialogs over `scenes/*.json` (also `Ctrl+S` / `Ctrl+Shift+S`) and **Set as
 default** (writes `scenes/default.json`); every save/export raises a confirmation popup
 showing the absolute path with a strip of the current palette. On startup the editor loads
