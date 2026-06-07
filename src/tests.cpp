@@ -559,9 +559,44 @@ static void surface_texture() {
         assert(approx(x, 0.2f) || approx(x, 0.5f) || approx(x, 0.9f));
     }
 
+    // Gas-giant belts: band_levels posterizes the field into flat belts. With
+    // band_strength=1 the field is purely the posterized belts, so every sample is
+    // one of `levels` flat values (a smooth sine would hit in-between values).
+    Material gb;
+    gb.pattern = 1;
+    gb.band_strength = 1.0f;
+    gb.band_freq = 6.0f;
+    gb.band_levels = 3;
+    for (int i = 0; i < 400; ++i) {
+        Vec3 d = normalize(Vec3(std::sin(i * 0.3f), std::cos(i * 0.7f), std::sin(i * 0.13f)));
+        float f = surface_field(gb, d);
+        assert(approx(f, 0.0f) || approx(f, 0.5f) || approx(f, 1.0f));
+    }
+
+    // Storms: zero strength yields no coverage anywhere; a positive strength yields
+    // a strong oval somewhere (the guaranteed "great red spot").
+    Material st;
+    st.storm = 0.0f;
+    st.storm_seed = 42;
+    float maxw_off = 0.0f, maxw_on = 0.0f;
+    Material st_on = st;
+    st_on.storm = 0.8f;
+    for (int i = 0; i < 2000; ++i) {
+        Vec3 d = normalize(Vec3(std::sin(i * 0.11f), std::cos(i * 0.37f) - 0.3f,
+                                std::sin(i * 0.07f) + 0.2f));
+        maxw_off = std::max(maxw_off, storm_weight(st, d));
+        maxw_on = std::max(maxw_on, storm_weight(st_on, d));
+    }
+    assert(maxw_off == 0.0f && maxw_on > 0.5f);
+
     // JSON round-trips the new texture fields.
     Scene scene;
     g.band_var = 0.7f;
+    g.band_levels = 5;
+    g.turbulence = 0.6f;
+    g.storm = 0.7f;
+    g.storm_seed = 123;
+    g.storm_color = Vec3(0.8f, 0.2f, 0.1f);
     g.terrain.enabled = true;
     g.terrain.sea_level = 0.4f;
     g.terrain.levels = 4;
@@ -577,6 +612,9 @@ static void surface_texture() {
            approx(bs->material.terrain.sea_level, 0.4f) &&
            bs->material.terrain.levels == 4 &&
            approx(bs->material.clouds.drift, 0.05f));
+    assert(bs->material.band_levels == 5 && approx(bs->material.turbulence, 0.6f) &&
+           approx(bs->material.storm, 0.7f) && bs->material.storm_seed == 123 &&
+           approx(bs->material.storm_color.x, 0.8f));
 }
 
 static void lighting() {

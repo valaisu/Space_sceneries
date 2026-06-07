@@ -39,3 +39,7 @@ Vec3 surface_color(const Material& m, float field);
 // (via tex_ramp) above, with seasonal polar ice caps. `season_swing` shifts the
 // cap edge (baked from time in world_at_time). Exposed for testing.
 Vec3 terrain_color(const Material& m, Vec3 local_unit, float season_swing);
+
+// Gas-giant storm coverage in [0,1] at a unit body-local point: a few oval
+// vortices placed from `storm_seed`, elongated east-west. 0 when storm <= 0.
+float storm_weight(const Material& m, Vec3 local_unit);

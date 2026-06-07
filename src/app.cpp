@@ -579,6 +579,19 @@ void draw_object_tab(Editor& ed) {
             ImGui::SliderFloat("Band freq", &m.band_freq, 1.0f, 30.0f);
             ImGui::SliderFloat("Band variation", &m.band_var, 0.0f, 2.0f);
             ImGui::SliderFloat("Warp", &m.warp, 0.0f, 2.0f);
+            ImGui::SliderInt("Belt colors", &m.band_levels, 0, 8);
+            ImGui::SetItemTooltip("Gas giants: 0 = each belt picks any color along the "
+                                  "ramp; 2+ = snap belts to that many distinct shades.");
+            ImGui::SliderFloat("Turbulence", &m.turbulence, 0.0f, 1.5f);
+            ImGui::SetItemTooltip("Zonal filament texture at the belt boundaries.");
+
+            ImGui::SeparatorText("Storms");
+            ImGui::SliderFloat("Storm strength", &m.storm, 0.0f, 1.0f);
+            if (m.storm > 0.0f) {
+                ImGui::SliderInt("Storm seed", &m.storm_seed, 0, 9999);
+                ImGui::ColorEdit3("Storm color", &m.storm_color.x);
+            }
+
             ImGui::SeparatorText("Surface colors");
             ramp_editor(m.tex_ramp, m.albedo);
             if (m.tex_ramp.empty()) ImGui::ColorEdit3("Detail", &m.detail.x);
@@ -867,6 +880,40 @@ void draw_generate_tab(Editor& ed) {
     ImGui::SeparatorText("Features");
     ImGui::Checkbox("Rings on gas giants", &g.rings);
     ImGui::Checkbox("Atmospheres", &g.atmospheres);
+
+    ImGui::SeparatorText("Appearance (advanced)");
+    ImGui::TextDisabled("Chances are 0..1; the rest bias a jittered random center.");
+    if (ImGui::CollapsingHeader("Gas giants")) {
+        ImGui::SliderFloat("Storm chance", &g.gas_storm_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Storm strength", &g.gas_storm_strength, 0.0f, 1.0f);
+        ImGui::SliderFloat("Belt count", &g.gas_belt_count, 2.0f, 14.0f);
+        ImGui::SliderFloat("Belt width variation", &g.gas_belt_var, 0.0f, 1.2f);
+        ImGui::SliderFloat("Turbulence", &g.gas_turbulence, 0.0f, 1.2f);
+        ImGui::SliderFloat("Swirl", &g.gas_swirl, 0.0f, 0.5f);
+    }
+    if (ImGui::CollapsingHeader("Spin & tilt")) {
+        ImGui::SliderFloat("Spin speed", &g.spin_speed, 0.2f, 3.0f);
+        ImGui::SetItemTooltip("Rotation-speed multiplier (1 = default).");
+        ImGui::SliderFloat("Axial tilt", &g.axial_tilt, 0.0f, 45.0f, "%.0f deg");
+        ImGui::SliderFloat("Sideways-tilt chance", &g.extreme_tilt_chance, 0.0f, 0.5f);
+        ImGui::SetItemTooltip("Chance of a Uranus-like ~90 deg axial tilt.");
+    }
+    if (ImGui::CollapsingHeader("Terrestrials")) {
+        ImGui::SliderFloat("Water-world chance", &g.water_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Exotic-hue chance", &g.exotic_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Crisp-biome chance", &g.biome_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Ice-cap chance", &g.cap_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Frozen-world chance", &g.frozen_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Seasonal-cap chance", &g.season_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Cloud chance", &g.cloud_chance, 0.0f, 1.0f);
+    }
+    if (ImGui::CollapsingHeader("Feature chances")) {
+        ImGui::SliderFloat("Ring chance", &g.ring_chance, 0.0f, 1.0f);
+        ImGui::SetItemTooltip("Per gas giant; needs 'Rings on gas giants'.");
+        ImGui::SliderFloat("Atmosphere chance", &g.atmosphere_chance, 0.0f, 1.0f);
+        ImGui::SetItemTooltip("Per planet; needs 'Atmospheres'.");
+        ImGui::SliderFloat("Moon polar-cap chance", &g.moon_cap_chance, 0.0f, 1.0f);
+    }
 
     ImGui::Separator();
     if (ImGui::Button("Generate system")) do_generate(ed);

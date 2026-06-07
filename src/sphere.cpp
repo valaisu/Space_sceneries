@@ -12,6 +12,12 @@ float hash31(float x, float y, float z) {
     return h - std::floor(h);
 }
 
+// Deterministic 1D hash -> [0,1] (storm placement).
+float hash11(float x) {
+    float h = std::sin(x * 91.37f + 13.1f) * 43758.5453f;
+    return h - std::floor(h);
+}
+
 // Smooth 3D value noise in [0,1] (trilinear interpolation of lattice hashes).
 // Sampled in object space, so it has no seam and no pole pinching on a sphere.
 float value_noise3(Vec3 p) {
@@ -48,15 +54,59 @@ float fbm3(Vec3 p, int octaves) {
 float surface_field(const Material& m, Vec3 p) {
     float n = fbm3(p * m.noise_scale, m.noise_octaves);  // [0,1]
     if (m.band_strength <= 0.0f) return n;
-    // Latitude bands (gas giants): sine of latitude, optionally warped by noise
-    // for swirly bands. p is a unit vector, so p.y is the sine of latitude.
+    // Gas-giant belts. p is a unit vector, so p.y is the sine of latitude. Build a
+    // belt COORDINATE from latitude (warped by noise for swirl); band_var distorts
+    // the latitude->belt spacing so belt WIDTHS vary (steeper local slope = narrower
+    // belt) instead of an even comb.
     float lat = p.y + (n - 0.5f) * m.warp;
-    float phase = lat * m.band_freq * PI;
-    // band_var bunches/spreads the stripes with latitude so widths vary (a low-
-    // frequency phase wobble) instead of a perfectly even comb.
-    phase += m.band_var * std::sin(lat * 2.0f * PI);
-    float bands = 0.5f + 0.5f * std::sin(phase);
-    return n * (1.0f - m.band_strength) + bands * m.band_strength;
+    float coord = lat * m.band_freq +
+                  m.band_var * std::sin(lat * m.band_freq * 0.7f + 1.7f);
+    // Zonal filaments: high-freq fbm stretched east-west (latitude compressed) wiggles
+    // the belt boundaries and adds texture aligned with the belts.
+    if (m.turbulence > 0.0f) {
+        Vec3 q(p.x, p.y * 3.0f, p.z);
+        coord += (fbm3(q * m.noise_scale * 2.5f, 3) - 0.5f) * m.turbulence;
+    }
+    // Each belt samples its OWN position along the ramp (the "line") via a per-belt
+    // hash, so consecutive belts are distinct colors drawn from the whole ramp rather
+    // than alternating two anchors. band_levels (>1) snaps belts to a limited set of
+    // ramp positions; 0 = each belt anywhere on the line.
+    float belt = std::floor(coord);
+    float c = hash11(belt * 1.37f + 0.5f);
+    if (m.band_levels > 1) {
+        int b = std::min(m.band_levels - 1, static_cast<int>(c * m.band_levels));
+        c = static_cast<float>(b) / (m.band_levels - 1);
+    }
+    return n * (1.0f - m.band_strength) + c * m.band_strength;
+}
+
+float storm_weight(const Material& m, Vec3 p) {
+    if (m.storm <= 0.0f) return 0.0f;
+    float best = 0.0f;
+    float lon_p = std::atan2(p.z, p.x);
+    // A small fixed set of candidate ovals; the first is always present (the "great
+    // red spot"), the rest appear as storm -> 1, so seeds give 1..3 storms.
+    for (int k = 0; k < 3; ++k) {
+        float s = static_cast<float>(m.storm_seed) + k * 17.0f;
+        if (k > 0 && hash11(s + 7.1f) > m.storm) continue;
+        // Primary storm (k=0, the "great red spot") sits at a mid-latitude and is
+        // bigger; secondary ovals are smaller and may sit anywhere.
+        float latspread = (k == 0) ? 0.9f : 1.4f;
+        float sz = (k == 0) ? 1.7f : 1.0f;
+        float cy = (hash11(s) - 0.5f) * latspread;     // latitude center
+        float clon = hash11(s + 3.3f) * 2.0f * PI;     // longitude center
+        float dlat = p.y - cy;
+        float dlon = lon_p - clon;
+        dlon = std::atan2(std::sin(dlon), std::cos(dlon));  // wrap to [-PI, PI]
+        float rlat = (0.08f + 0.05f * hash11(s + 1.7f)) * sz;  // half-height in latitude
+        float rlon = (0.28f + 0.30f * hash11(s + 5.5f)) * sz;  // half-width, wider (oval)
+        float d = std::sqrt((dlat / rlat) * (dlat / rlat) +
+                            (dlon / rlon) * (dlon / rlon));
+        float w = std::clamp(1.0f - d, 0.0f, 1.0f);
+        w = w * w * (3.0f - 2.0f * w);  // smoothstep falloff
+        best = std::max(best, w);
+    }
+    return best * std::clamp(m.storm, 0.0f, 1.0f);
 }
 
 Vec3 terrain_color(const Material& m, Vec3 p, float season_swing) {
@@ -128,6 +178,11 @@ bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
         rec.material.albedo = material.terrain.enabled
             ? terrain_color(material, ln, season_swing)
             : surface_color(material, surface_field(material, ln));
+        // Gas-giant storms: oval vortices blended over the banded surface.
+        if (material.storm > 0.0f) {
+            float w = storm_weight(material, ln);
+            rec.material.albedo = rec.material.albedo * (1.0f - w) + material.storm_color * w;
+        }
     }
     // Cloud layer: a second translucent fbm texture composited over the base.
     if (material.clouds.enabled) {

@@ -105,6 +105,25 @@ when empty). `band_var` wobbles the band phase with latitude so gas-giant stripe
 visibly rotates. `surface_field` (scalar) / `surface_color` (albedo) are split out and
 unit-tested.
 
+**Gas-giant belts & storms.** To avoid wavy "mush" giants, the band path builds a
+discrete-belt structure instead of a symmetric sine (which alternated two ramp ends):
+it makes a **belt coordinate** from latitude, where `band_var` distorts the
+latitude→belt spacing so belt **widths vary** (steeper local slope = narrower belt);
+`floor` of that coordinate is the **belt index**, and each belt samples its **own
+position along `tex_ramp`** via a per-belt `hash11`, so consecutive belts are distinct
+colors drawn from the whole ramp ("the line") rather than an A/B/A/B alternation.
+`band_levels` (>1) snaps belts to that many distinct ramp positions (0 = each belt
+anywhere on the line). `turbulence` adds high-freq fbm **stretched east–west** (latitude
+compressed ×3) to the belt coordinate, wiggling the **belt boundaries** into filaments;
+a small `n` noise term survives at high `band_strength` for interior texture. `storm`
+(>0) overlays a few **oval vortices** via `storm_weight` (declared in sphere.h,
+unit-tested): a guaranteed primary "great red spot" plus hash-placed (`storm_seed`)
+smaller ovals that appear as `storm`→1, each elongated east–west, blended toward
+`storm_color` in `Sphere::hit` after the band albedo. The generator gives gas giants
+high `band_strength`, varied `band_var` widths, `turbulence`, calmer `warp`, usually a
+3-stop ramp (the line), free belt colors (`band_levels` mostly 0), and storms on ~1/3
+(the primary "great red spot" is enlarged and mid-latitude so it reads clearly).
+
 **Terrain (rocky planets).** A sphere `Material` may carry a `Terrain` (gated by
 `pattern != 0`, replacing the scalar field→ramp path for the base albedo). It reuses
 the fbm field as **elevation**: below `sea_level` is **ocean** (the `ocean` color,
@@ -177,9 +196,12 @@ dry/desert worlds; a **3-color biome ramp posterized into flat bands** so region
 crisply; ice caps vary from none through small to a frozen world, sometimes seasonal;
 some get **drifting clouds**, not always white; ~30% are **exotic**, an HSV hue family
 shifted off Earth-like greens/blues), outer ones likelier **gas giants**
-(banded texture with varied stripe widths, sometimes a ring + atmosphere). The overall
+(discrete belts of varied widths, each a distinct color sampled along the ramp, with
+zonal filaments + ~1/3 an oval storm, sometimes a ring + atmosphere). The overall
 rocky↔gas split is set by `gas_ratio` (a mild outward tilt keeps inner planets rockier).
-Moons are mottled, some with polar caps. Orbits are near-coplanar (small `inclination` tilt) with optional
+Moons are mottled, some with polar caps. Every planet **spins** (period 3–10s) about a
+**randomly tilted axis** (small, ~up to 22°), with a rare **~8% Uranus-like extreme tilt
+(~90°, spins on its side)**. Orbits are near-coplanar (small `inclination` tilt) with optional
 `eccentricity`. **Moons stay bubbled:** a planet's moon orbit is capped at `0.4 ×` the
 *worst-case* clearance to either neighbouring orbit (computed from their perihelion/
 aphelion edges) — strictly less than half the gap — so a moon is always closer to its
@@ -286,7 +308,14 @@ slider. The **Generate** tab drives the random system generator (see below):
 seed/planet-count/moons/spacing/inclination/eccentricity knobs + a **gas-giant ratio**
 slider (`gas_ratio`: fraction of planets that are gas giants, 0 = all rocky) +
 rings/atmosphere toggles, with **Generate** / **Randomize** buttons that replace all bodies (Undo
-recovers the prior scene). Its **Eclipse loop** section (mirrored by an **Infinite**
+recovers the prior scene). An **Appearance (advanced)** block of collapsing headers
+(Gas giants / Spin & tilt / Terrestrials / Feature chances) exposes the per-body
+appearance + probability params on `SystemGenParams` (storm chance/strength, belt
+count/width/turbulence/swirl; spin speed, axial tilt, sideways-tilt chance; water/exotic/
+crisp-biome/ice-cap/frozen/seasonal/cloud chances; ring/atmosphere/moon-cap chances) —
+"chance" sliders are probabilities, the rest bias a jittered random center; defaults
+reproduce the old hardcoded look. **These flow through to the eclipse loop too** (it
+calls `generate_system`), so they retune every cycle, not just one-shot Generate. Its **Eclipse loop** section (mirrored by an **Infinite**
 checkbox on the Timeline) toggles the infinite self-renewing mode, with a
 **Scene seconds** slider (fixed per-scene duration), a **Camera loops** knob
 (1–3), a **Morph/Snap** palette-transition combo and a **Regenerate now** button (also

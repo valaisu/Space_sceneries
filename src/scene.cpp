@@ -43,7 +43,10 @@ json to_json(const Material& m) {
            {"pattern", m.pattern}, {"detail", to_json(m.detail)},
            {"noise_scale", m.noise_scale}, {"noise_octaves", m.noise_octaves},
            {"band_strength", m.band_strength}, {"band_freq", m.band_freq},
-           {"band_var", m.band_var}, {"warp", m.warp}};
+           {"band_var", m.band_var}, {"warp", m.warp},
+           {"band_levels", m.band_levels}, {"turbulence", m.turbulence},
+           {"storm", m.storm}, {"storm_seed", m.storm_seed},
+           {"storm_color", to_json(m.storm_color)}};
     if (!m.ring_ramp.empty()) j["ring_ramp"] = ramp_to_json(m.ring_ramp);
     if (!m.tex_ramp.empty()) j["tex_ramp"] = ramp_to_json(m.tex_ramp);
     const Terrain& tr = m.terrain;
@@ -80,6 +83,11 @@ Material material_from_json(const json& j) {
     m.band_freq = j.value("band_freq", m.band_freq);
     m.band_var = j.value("band_var", m.band_var);
     m.warp = j.value("warp", m.warp);
+    m.band_levels = j.value("band_levels", m.band_levels);
+    m.turbulence = j.value("turbulence", m.turbulence);
+    m.storm = j.value("storm", m.storm);
+    m.storm_seed = j.value("storm_seed", m.storm_seed);
+    if (j.contains("storm_color")) m.storm_color = vec3_from_json(j.at("storm_color"));
     if (j.contains("ring_ramp")) ramp_from_json(j.at("ring_ramp"), m.ring_ramp);
     if (j.contains("tex_ramp")) ramp_from_json(j.at("tex_ramp"), m.tex_ramp);
     if (j.contains("terrain")) {
@@ -399,23 +407,46 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
         m.pattern = gas ? 1 : 2;
         m.noise_octaves = 4;
         m.noise_scale = gas ? rf(2.0f, 3.5f) : rf(3.0f, 5.0f);
-        if (gas) {  // banded two-tone gas giant (tan/orange or blue family)
-            Vec3 a = (u01(rng) < 0.5f)
+        if (gas) {  // banded gas giant: crisp belts + zonal filaments, sometimes a storm
+            bool warm = u01(rng) < 0.5f;
+            Vec3 a = warm
                          ? Vec3(rf(0.6f, 0.85f), rf(0.5f, 0.7f), rf(0.3f, 0.45f))
                          : Vec3(rf(0.3f, 0.5f), rf(0.5f, 0.7f), rf(0.7f, 0.9f));
             m.albedo = a;
             m.detail = a * rf(0.55f, 0.8f);
-            m.band_strength = rf(0.6f, 0.95f);
-            m.band_freq = rf(4.0f, 10.0f);
-            m.band_var = rf(0.0f, 1.2f);  // uneven stripe widths
-            m.warp = rf(0.1f, 0.6f);
+            // High band_strength keeps belts distinct (a little noise stays for texture).
+            m.band_strength = rf(0.82f, 0.95f);
+            m.band_freq = p.gas_belt_count * rf(0.7f, 1.3f);
+            m.band_var = std::min(1.3f, p.gas_belt_var * rf(0.6f, 1.4f));  // uneven WIDTHS
+            m.warp = p.gas_swirl * rf(0.4f, 1.6f);        // swirl (calm keeps belts as belts)
+            m.turbulence = p.gas_turbulence * rf(0.6f, 1.4f);  // zonal belt-edge filaments
+            // Each belt samples its own color along the ramp; usually free (0), some-
+            // times snapped to a small set of distinct shades.
+            m.band_levels = (u01(rng) < 0.35f) ? ri(4, 8) : 0;
+            // A 3-stop ramp (the "line" belts sample from) gives a richer set of belt
+            // colors than the albedo<->detail fallback; most gas giants get one.
+            if (u01(rng) < 0.7f) {
+                Vec3 c1 = a * rf(0.55f, 0.75f);
+                Vec3 accent = warm ? Vec3(rf(0.8f, 0.95f), rf(0.55f, 0.7f), rf(0.35f, 0.5f))
+                                   : Vec3(rf(0.55f, 0.75f), rf(0.75f, 0.9f), rf(0.85f, 1.0f));
+                m.tex_ramp = {{0.0f, c1}, {0.55f, a}, {1.0f, accent}};
+            }
+            // Storms: a red/cream oval (or alien tint) over the belts.
+            if (u01(rng) < p.gas_storm_chance) {
+                m.storm = std::min(1.0f, p.gas_storm_strength * rf(0.85f, 1.15f));
+                m.storm_seed = ri(1, 9999);
+                float sroll = u01(rng);
+                m.storm_color = (sroll < 0.5f) ? Vec3(rf(0.7f, 0.9f), rf(0.25f, 0.4f), rf(0.15f, 0.3f))  // red
+                              : (sroll < 0.8f) ? Vec3(rf(0.92f, 1.0f), rf(0.9f, 0.97f), rf(0.85f, 0.95f)) // cream
+                                               : a * rf(0.4f, 0.6f);                                       // dark vortex
+            }
         } else {  // rocky planet: ocean/land terrain, varied ice caps, sometimes clouds
             m.band_strength = 0.0f;       // terrain wants a pure elevation field
             m.noise_octaves = 3;          // smoother field -> cleaner posterized regions
             Terrain& tr = m.terrain;
             tr.enabled = true;
-            bool watery = u01(rng) < 0.55f;
-            bool exotic = u01(rng) < 0.3f;  // mostly familiar worlds, sometimes alien hues
+            bool watery = u01(rng) < p.water_chance;
+            bool exotic = u01(rng) < p.exotic_chance;  // mostly familiar, sometimes alien hues
             tr.sea_level = watery ? rf(0.42f, 0.62f) : rf(0.0f, 0.2f);  // dry worlds barely flood
             Vec3 ocean = watery
                 ? Vec3(rf(0.05f, 0.15f), rf(0.2f, 0.35f), rf(0.45f, 0.65f))   // blue sea
@@ -442,21 +473,22 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
             m.tex_ramp = {{0.0f, c0}, {0.5f, c1}, {1.0f, c2}};
             m.albedo = c1;
             // Posterize into crisp bands on most worlds; a few stay smooth for variety.
-            tr.levels = (u01(rng) < 0.8f) ? 3 : 0;
-            // Ice caps vary widely: from none, through small, to a frozen world.
+            tr.levels = (u01(rng) < p.biome_chance) ? 3 : 0;
+            // Ice caps: no caps above cap_chance, fully frozen below frozen_chance,
+            // otherwise a varied (usually visible) cap.
             float caproll = u01(rng);
-            if (caproll < 0.2f) tr.cap = 1.1f;                  // no caps
-            else if (caproll < 0.35f) tr.cap = rf(0.3f, 0.5f);  // frozen: big caps
-            else tr.cap = rf(0.5f, 0.9f);                       // varied, often clearly visible
+            if (caproll > p.cap_chance) tr.cap = 1.1f;             // no caps
+            else if (caproll < p.frozen_chance) tr.cap = rf(0.3f, 0.5f);  // frozen: big caps
+            else tr.cap = rf(0.5f, 0.9f);                          // varied, often clearly visible
             tr.cap_color = (u01(rng) < 0.75f)
                 ? Vec3(rf(0.88f, 0.97f), rf(0.92f, 0.98f), 1.0f)            // white-blue ice
                 : Vec3(rf(0.85f, 0.97f), rf(0.7f, 0.85f), rf(0.6f, 0.8f));  // tinted (dust/CO2)
-            if (tr.cap < 1.0f && u01(rng) < 0.6f) {  // most capped worlds breathe seasons
+            if (tr.cap < 1.0f && u01(rng) < p.season_chance) {  // capped worlds breathe seasons
                 tr.cap_season = rf(0.06f, 0.18f);
                 tr.season_period = rf(20.0f, 60.0f);
             }
             // Clouds on some worlds (commoner when watery); not necessarily white.
-            if (u01(rng) < (watery ? 0.6f : 0.3f)) {
+            if (u01(rng) < (watery ? p.cloud_chance : p.cloud_chance * 0.5f)) {
                 Clouds& cl = m.clouds;
                 cl.enabled = true;
                 cl.scale = rf(3.0f, 6.0f);
@@ -472,7 +504,7 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
                 cl.ramp = {{0.0f, cc, 0.0f}, {1.0f, cc, 1.0f}};
             }
         }
-        if (p.atmospheres && u01(rng) < 0.45f) {
+        if (p.atmospheres && u01(rng) < p.atmosphere_chance) {
             m.atmosphere.enabled = true;
             m.atmosphere.color = Vec3(rf(0.3f, 0.5f), rf(0.5f, 0.7f), rf(0.8f, 1.0f));
             m.atmosphere.thickness = rf(0.3f, 0.6f);
@@ -489,8 +521,14 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
         b.orbit.phase = rf(0.0f, TWO_PI);
         b.orbit.eccentricity = ecc[i];
         b.orbit.normal = tilted_up(rng, p.inclination);
-        b.spin.axis = tilted_up(rng, 0.4f);
-        b.spin.period = rf(3.0f, 10.0f) * (gas ? 0.6f : 1.0f);
+        b.spin.axis = tilted_up(rng, p.axial_tilt / 18.0f);  // small random axial tilt
+        if (u01(rng) < p.extreme_tilt_chance) {  // Uranus-like extreme tilt (~90 deg, on its side)
+            float az = u01(rng) * TWO_PI;
+            Vec3 ax(std::cos(az), 0.0f, std::sin(az));
+            float ang = rf(75.0f, 105.0f) * TWO_PI / 360.0f;
+            b.spin.axis = normalize(rotate_about(Vec3(0, 1, 0), ax, ang));
+        }
+        b.spin.period = rf(3.0f, 10.0f) * (gas ? 0.6f : 1.0f) / std::max(0.05f, p.spin_speed);
         planet_idx[i] = static_cast<int>(bodies.size());
         bodies.push_back(b);
 
@@ -499,7 +537,7 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
 
     // --- Rings on some gas giants (added before moons so moons clear the ring) ---
     for (int i = 0; i < count; ++i) {
-        if (!p.rings || !is_gas[i] || u01(rng) < 0.55f) continue;  // ~45% of gas giants
+        if (!p.rings || !is_gas[i] || u01(rng) >= p.ring_chance) continue;
         float inner = planet_rad[i] * rf(1.2f, 1.5f);
         float outer = inner + planet_rad[i] * rf(0.4f, 0.9f);
         ring_outer[i] = outer;
@@ -539,7 +577,7 @@ void generate_system(Scene& scene, const SystemGenParams& p) {
             mm.pattern = 2;
             mm.noise_scale = rf(4.0f, 7.0f);
             mm.detail = mm.albedo * 0.6f;
-            if (u01(rng) < 0.4f) {  // some moons wear bright polar caps
+            if (u01(rng) < p.moon_cap_chance) {  // some moons wear bright polar caps
                 mm.terrain.enabled = true;
                 mm.terrain.sea_level = 0.0f;  // airless: no ocean, just the mottle + caps
                 mm.terrain.cap = rf(0.78f, 0.92f);
