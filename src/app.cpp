@@ -639,11 +639,23 @@ void draw_stylize_tab(Editor& ed) {
     ImGui::Checkbox("Enabled", &pp.enabled);
 
     ImGui::SeparatorText("Generate");
-    const char* anchors[] = {"None (random)", "One color", "Two colors"};
-    ImGui::Combo("Anchors", &pp.anchor_count, anchors, 3);
-    if (pp.anchor_count >= 1) ImGui::ColorEdit3("Base A", &pp.base_a.x);
-    if (pp.anchor_count >= 2) ImGui::ColorEdit3("Base B", &pp.base_b.x);
+    const char* schemes[] = {"Anchors (line)", "Monochromatic", "Complementary",
+                             "Triadic", "Analogous"};
+    ImGui::Combo("Scheme", &pp.scheme, schemes, 5);
+    if (pp.scheme == 0) {  // classic: interpolate a line through hand-picked anchors
+        const char* anchors[] = {"None (random)", "One color", "Two colors", "Three colors"};
+        ImGui::Combo("Anchors", &pp.anchor_count, anchors, 4);
+        if (pp.anchor_count >= 1) ImGui::ColorEdit3("Base A", &pp.base_a.x);
+        if (pp.anchor_count >= 2) ImGui::ColorEdit3("Base B", &pp.base_b.x);
+        if (pp.anchor_count >= 3) ImGui::ColorEdit3("Base C", &pp.base_c.x);
+    } else {  // rule-based harmonies take their hue from base_a, ramp dark->light
+        ImGui::ColorEdit3("Base color", &pp.base_a.x);
+    }
     ImGui::SliderFloat("Base hue", &pp.base_hue, 0.0f, 1.0f);
+    // Spread fans the two-anchor ramp across a wider hue arc; only meaningful for the
+    // line scheme with fewer than three anchors.
+    if (pp.scheme == 0 && pp.anchor_count < 3)
+        ImGui::SliderFloat("Spread", &pp.spread, 0.0f, 1.0f);
     ImGui::SliderInt("Palette size", &pp.palette_size, 2, 32);
     ImGui::SliderFloat("Randomness", &pp.randomness, 0.0f, 1.0f);
     ImGui::InputInt("Palette seed", &pp.palette_seed);

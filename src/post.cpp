@@ -129,46 +129,109 @@ void generate_palette(PostProcess& pp) {
     pp.palette.clear();
     int n = std::max(1, pp.palette_size);
     Rng rng{static_cast<uint32_t>(pp.palette_seed) * 2654435761u + 1u};
-
-    // Pick the two HSV endpoints of the ramp from the anchor count.
-    Vec3 a, b;
-    if (pp.anchor_count <= 0) {  // fully seed-chosen harmonic pair
-        float h = rng.next();
-        float s = 0.5f + 0.4f * rng.next();
-        a = Vec3(h, s, 0.15f + 0.2f * rng.next());
-        b = Vec3(h + harmonic_offset(rng), s * (0.6f + 0.3f * rng.next()), 0.9f);
-    } else if (pp.anchor_count == 1) {  // ramp around base_a's hue
-        Vec3 base = rgb_to_hsv(clamp01(pp.base_a));
-        a = Vec3(base.x, base.y, std::max(0.15f, base.z * 0.4f));
-        b = Vec3(base.x + harmonic_offset(rng),
-                 std::clamp(base.y * 0.8f, 0.0f, 1.0f),
-                 std::min(1.0f, base.z * 1.2f + 0.3f));
-    } else {  // classic base_a -> base_b
-        a = rgb_to_hsv(clamp01(pp.base_a));
-        b = rgb_to_hsv(clamp01(pp.base_b));
-    }
-
-    // Take the shorter way around the hue wheel so the ramp stays harmonic.
-    float dh = b.x - a.x;
-    if (dh > 0.5f) dh -= 1.0f;
-    if (dh < -0.5f) dh += 1.0f;
-
-    // Rotate the whole ramp to the chosen base hue (recenters it on any color).
-    a.x += pp.base_hue;
-
     const float r = std::max(0.0f, pp.randomness);
-    for (int i = 0; i < n; ++i) {
-        float t = (n == 1) ? 0.0f : static_cast<float>(i) / (n - 1);
-        Vec3 hsv(a.x + dh * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t);
-        if (r > 0.0f) {  // perturb each swatch — jitter, not scatter (keeps it harmonic)
-            hsv.x += (rng.next() - 0.5f) * 0.05f * r;
-            hsv.y += (rng.next() - 0.5f) * 0.15f * r;
-            hsv.z += (rng.next() - 0.5f) * 0.15f * r;
-        }
+    auto jitter = [&](Vec3& hsv) {  // perturb a swatch — jitter, not scatter
+        if (r <= 0.0f) return;
+        hsv.x += (rng.next() - 0.5f) * 0.05f * r;
+        hsv.y += (rng.next() - 0.5f) * 0.15f * r;
+        hsv.z += (rng.next() - 0.5f) * 0.15f * r;
+    };
+    auto push_hsv = [&](Vec3 hsv) {
         hsv.x -= std::floor(hsv.x);
         hsv.y = std::clamp(hsv.y, 0.0f, 1.0f);
         hsv.z = std::clamp(hsv.z, 0.0f, 1.0f);
         pp.palette.push_back(clamp01(hsv_to_rgb(hsv)));
+    };
+
+    // Rule-based harmonic schemes (1-4): pick the hue(s) by a color-wheel rule from
+    // base_a's hue, then give each hue its own dark -> light ramp so the palette
+    // always spans brightness (light+dark of each hue; usable dark for backgrounds).
+    if (pp.scheme != 0) {
+        Vec3 base = rgb_to_hsv(clamp01(pp.base_a));
+        float h0 = base.x + pp.base_hue;
+        float sat = (base.y < 0.1f) ? 0.6f : base.y;  // near-grey base: use a usable saturation
+        std::vector<float> offs;
+        switch (pp.scheme) {
+            case 1: offs = {0.0f}; break;                            // monochromatic
+            case 2: offs = {0.0f, 0.5f}; break;                      // complementary
+            case 3: offs = {0.0f, 1.0f / 3, 2.0f / 3}; break;        // triadic
+            default: offs = {-1.0f / 12, 0.0f, 1.0f / 12}; break;    // analogous
+        }
+        const int m = static_cast<int>(offs.size());
+        const float v_dark = 0.12f, v_light = 0.97f;
+        const float s_dark = std::min(1.0f, sat + 0.10f);   // shadows a touch more saturated
+        const float s_light = std::max(0.12f, sat - 0.30f);  // highlights desaturate
+        for (int j = 0; j < m; ++j) {
+            int c = n / m + (j < n % m ? 1 : 0);  // split swatches across the hues
+            for (int k = 0; k < c; ++k) {
+                float t = (c == 1) ? 0.5f : static_cast<float>(k) / (c - 1);  // dark -> light
+                Vec3 hsv(h0 + offs[j], s_dark + (s_light - s_dark) * t,
+                         v_dark + (v_light - v_dark) * t);
+                jitter(hsv);
+                push_hsv(hsv);
+            }
+        }
+        return;
+    }
+
+    // Build the HSV key points the ramp passes through. Usually two endpoints;
+    // with three anchors the ramp bends through base_c, so it can span three
+    // distinct hues (blue+green+orange) — a triangle, not a single line.
+    std::vector<Vec3> keys;
+    if (pp.anchor_count <= 0) {  // fully seed-chosen harmonic pair
+        float h = rng.next();
+        float s = 0.5f + 0.4f * rng.next();
+        keys.push_back(Vec3(h, s, 0.15f + 0.2f * rng.next()));
+        keys.push_back(Vec3(h + harmonic_offset(rng),
+                            s * (0.6f + 0.3f * rng.next()), 0.9f));
+    } else if (pp.anchor_count == 1) {  // ramp around base_a's hue
+        Vec3 base = rgb_to_hsv(clamp01(pp.base_a));
+        keys.push_back(Vec3(base.x, base.y, std::max(0.15f, base.z * 0.4f)));
+        keys.push_back(Vec3(base.x + harmonic_offset(rng),
+                            std::clamp(base.y * 0.8f, 0.0f, 1.0f),
+                            std::min(1.0f, base.z * 1.2f + 0.3f)));
+    } else if (pp.anchor_count == 2) {  // classic base_a -> base_b
+        keys.push_back(rgb_to_hsv(clamp01(pp.base_a)));
+        keys.push_back(rgb_to_hsv(clamp01(pp.base_b)));
+    } else {  // three anchors: base_a -> base_b -> base_c
+        keys.push_back(rgb_to_hsv(clamp01(pp.base_a)));
+        keys.push_back(rgb_to_hsv(clamp01(pp.base_b)));
+        keys.push_back(rgb_to_hsv(clamp01(pp.base_c)));
+    }
+
+    // Unwrap each segment's hue to the shorter way around the wheel, accumulating
+    // into a continuous (possibly multi-turn) path we can lerp along.
+    std::vector<float> hue(keys.size());
+    hue[0] = keys[0].x;
+    for (size_t k = 1; k < keys.size(); ++k) {
+        float d = keys[k].x - keys[k - 1].x;
+        if (d > 0.5f) d -= 1.0f;
+        if (d < -0.5f) d += 1.0f;
+        hue[k] = hue[k - 1] + d;
+    }
+
+    // Spread fans the two-anchor ramp across a wider hue arc (so Randomize can
+    // sweep blue->green->orange). Skipped for three anchors so the hand-picked
+    // hues stay exact.
+    if (keys.size() == 2 && pp.spread > 0.0f) {
+        float d = hue[1] - hue[0];
+        float sgn = (std::fabs(d) < 1e-4f) ? 1.0f : (d >= 0.0f ? 1.0f : -1.0f);
+        hue[1] += sgn * std::clamp(pp.spread, 0.0f, 1.0f) * 0.85f;
+    }
+
+    const int segs = static_cast<int>(keys.size()) - 1;
+    for (int i = 0; i < n; ++i) {
+        float t = (n == 1) ? 0.0f : static_cast<float>(i) / (n - 1);
+        float u = t * segs;  // position along the (possibly multi-) segment path
+        int seg = std::min(static_cast<int>(u), segs - 1);
+        float lt = u - seg;
+        const Vec3& k0 = keys[seg];
+        const Vec3& k1 = keys[seg + 1];
+        Vec3 hsv(hue[seg] + (hue[seg + 1] - hue[seg]) * lt,
+                 k0.y + (k1.y - k0.y) * lt, k0.z + (k1.z - k0.z) * lt);
+        hsv.x += pp.base_hue;  // rotate the whole ramp to the chosen base hue
+        jitter(hsv);
+        push_hsv(hsv);
     }
 }
 
