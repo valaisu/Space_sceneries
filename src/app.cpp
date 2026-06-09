@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <csignal>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -18,7 +19,6 @@
 #include <GLFW/glfw3.h>
 
 #include "stb/stb_image_write.h"
-#include "gif.h"
 
 #include "scene.h"
 #include "sphere.h"
@@ -134,10 +134,10 @@ struct ExportJob {
     bool active = false;
     bool cancel = false;
     bool loops = false;            // false = duration sweep, true = eclipse cycles
-    GifWriter gif;
+    FILE* pipe = nullptr;          // ffmpeg stdin pipe
     int frame = 0, total = 0;
-    int delay_cs = 3;
     float dt = 0.0f;
+    std::chrono::steady_clock::time_point start_time;
     std::string path;
     std::vector<uint32_t> buf;
     // State saved on start and restored on finish so the live editor is unchanged.
@@ -200,9 +200,11 @@ struct Editor {
     std::vector<Vec3> pal_from, pal_to;  // palette morph endpoints
     int pal_transition = 0;              // 0 = Morph across the cycle, 1 = Snap at eclipse
 
-    // Animation export (GIF). Transient authoring controls; not persisted.
+    // Animation export (MP4). Transient authoring controls; not persisted.
     bool want_export_anim = false;       // one-shot flag to open the export dialog
-    char anim_name[128] = "anim";        // output base name -> renders/<name>.gif
+    bool want_export_error = false;
+    std::string export_error;
+    char anim_name[128] = "anim";        // output base name -> renders/<name>.mp4
     int anim_fps = 30;
     int anim_mode = 0;                   // 0 = by duration (s), 1 = by eclipse-loop cycles
     float anim_seconds = 10.0f;          // duration mode: total length
@@ -892,9 +894,9 @@ void drive_palette(Editor& ed) {
         pal[i] = ed.pal_from[i] * (1.0f - u) + ed.pal_to[i] * u;
 }
 
-// Animation export to renders/<name>.gif, run incrementally so the UI stays
-// responsive (step_export renders a time-budgeted batch per frame; the main loop
-// keeps pumping events and drawing a progress bar). Two modes:
+// Animation export to renders/<name>.mp4 via FFmpeg pipe, run incrementally so the
+// UI stays responsive (step_export renders a time-budgeted batch per frame; the main
+// loop keeps pumping events and drawing a progress bar). Two modes:
 //   Duration: sweep `time` over `anim_seconds` of the current scene (orbits/spin
 //             animate; the system is not regenerated). The scene is left untouched.
 //   Cycles:   render `anim_cycles` full eclipse loops, regenerating the system and
@@ -904,14 +906,32 @@ void start_export(Editor& ed) {
     ExportJob& j = ed.export_job;
     int fps = std::max(1, ed.anim_fps);
     j.dt = 1.0f / static_cast<float>(fps);
-    j.delay_cs = std::max(1, (100 + fps / 2) / fps);  // centiseconds per frame
-    j.path = std::string(RENDERS_DIR) + "/" + ed.anim_name + ".gif";
+    j.path = std::string(RENDERS_DIR) + "/" + ed.anim_name + ".mp4";
     j.loops = (ed.anim_mode != 0);
     j.frame = 0;
     j.cancel = false;
 
-    if (!GifBegin(&j.gif, j.path.c_str(), ed.scene.width, ed.scene.height, j.delay_cs))
-        return;  // couldn't open the file; stays inactive
+    // Pipe raw RGBA frames into ffmpeg. -vf scale rounds to even dimensions (H.264
+    // requires them); it's a no-op when width/height are already even.
+    std::string cmd =
+        "ffmpeg -y -f rawvideo -pixel_format rgba"
+        " -video_size " + std::to_string(ed.scene.width) + "x" + std::to_string(ed.scene.height) +
+        " -framerate " + std::to_string(fps) +
+        " -i pipe:0"
+        " -c:v libx264 -crf 18 -pix_fmt yuv420p -preset medium -tune animation -movflags +faststart"
+        " -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\""
+        " \"" + j.path + "\" 2>/dev/null";
+    if (system("which ffmpeg > /dev/null 2>&1") != 0) {
+        ed.export_error = "FFmpeg not found.\n\nInstall it with:\n  sudo apt install ffmpeg";
+        ed.want_export_error = true;
+        return;
+    }
+    j.pipe = popen(cmd.c_str(), "w");
+    if (!j.pipe) {
+        ed.export_error = "Failed to launch FFmpeg.";
+        ed.want_export_error = true;
+        return;
+    }
 
     // Snapshot everything either mode might touch, so finish_export can restore it.
     j.snap = scene_to_json(ed.scene);
@@ -930,12 +950,14 @@ void start_export(Editor& ed) {
     } else {
         j.total = std::max(1, static_cast<int>(ed.anim_seconds * fps + 0.5f));
     }
+    j.start_time = std::chrono::steady_clock::now();
     j.active = true;
 }
 
 void finish_export(Editor& ed) {
     ExportJob& j = ed.export_job;
-    GifEnd(&j.gif);
+    pclose(j.pipe);
+    j.pipe = nullptr;
 
     // Restore the live editor exactly as it was before the export began.
     ed.scene = scene_from_json(j.snap);
@@ -977,8 +999,7 @@ void step_export(Editor& ed) {
     while (j.frame < j.total && !j.cancel) {
         if (!j.loops) ed.time = j.frame * j.dt;
         render_scene(ed.scene, ed.time, j.buf);
-        GifWriteFrame(&j.gif, reinterpret_cast<const uint8_t*>(j.buf.data()),
-                      ed.scene.width, ed.scene.height, j.delay_cs);
+        fwrite(j.buf.data(), 4, ed.scene.width * ed.scene.height, j.pipe);
         if (j.loops) {  // advance, mirroring the live main loop (render-then-step)
             ed.time += j.dt;
             if (ed.cycle_len > 0.0f && ed.time >= ed.cycle_len) {
@@ -1008,7 +1029,19 @@ void draw_export_progress(Editor& ed) {
     ImGui::Text("Rendering %s", j.path.c_str());
     float frac = j.total > 0 ? static_cast<float>(j.frame) / j.total : 0.0f;
     ImGui::ProgressBar(frac, ImVec2(360, 0));
-    ImGui::Text("Frame %d / %d", j.frame, j.total);
+
+    float elapsed = std::chrono::duration<float>(
+        std::chrono::steady_clock::now() - j.start_time).count();
+    if (j.frame > 0) {
+        float remaining = elapsed / j.frame * (j.total - j.frame);
+        ImGui::Text("Frame %d / %d  |  Elapsed: %d:%02d  |  Remaining: ~%d:%02d",
+                    j.frame, j.total,
+                    (int)elapsed / 60, (int)elapsed % 60,
+                    (int)remaining / 60, (int)remaining % 60);
+    } else {
+        ImGui::Text("Frame %d / %d  |  Elapsed: %d:%02d",
+                    j.frame, j.total, (int)elapsed / 60, (int)elapsed % 60);
+    }
 
     float a = ed.scene.aspect_ratio();
     float pw = 360.0f, ph = std::max(1.0f, pw / a);
@@ -1184,8 +1217,8 @@ void draw_timeline(Editor& ed) {
         ed.want_saved = true;
     }
     ImGui::SameLine();
-    if (ImGui::Button("Export GIF...")) ed.want_export_anim = true;
-    ImGui::SetItemTooltip("Render an animated GIF (shows progress; cancelable).");
+    if (ImGui::Button("Export MP4...")) ed.want_export_anim = true;
+    ImGui::SetItemTooltip("Render an MP4 via FFmpeg (shows progress; cancelable).");
 
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::DragFloat("##time", &ed.time, 0.05f, 0.0f, 0.0f, "Time: %.2f s");
@@ -1335,8 +1368,9 @@ void do_load(Editor& ed, const std::string& name) {
 void draw_dialogs(Editor& ed) {
     if (ed.want_save_as) { ImGui::OpenPopup("Save scene as"); ed.want_save_as = false; }
     if (ed.want_load)    { ImGui::OpenPopup("Load scene");    ed.want_load = false; }
-    if (ed.want_export_anim) { ImGui::OpenPopup("Export animation"); ed.want_export_anim = false; }
-    if (ed.want_saved)   { ImGui::OpenPopup("File written");  ed.want_saved = false; }
+    if (ed.want_export_anim)  { ImGui::OpenPopup("Export animation"); ed.want_export_anim = false; }
+    if (ed.want_export_error) { ImGui::OpenPopup("Export error");     ed.want_export_error = false; }
+    if (ed.want_saved)        { ImGui::OpenPopup("File written");      ed.want_saved = false; }
 
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -1372,7 +1406,7 @@ void draw_dialogs(Editor& ed) {
     if (ImGui::BeginPopupModal("Export animation", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::SetNextItemWidth(240);
         ImGui::InputText("Name", ed.anim_name, sizeof(ed.anim_name));
-        ImGui::TextDisabled("Output: %s/%s.gif", RENDERS_DIR, ed.anim_name);
+        ImGui::TextDisabled("Output: %s/%s.mp4", RENDERS_DIR, ed.anim_name);
         ImGui::SetNextItemWidth(120);
         ImGui::InputInt("FPS", &ed.anim_fps);
         ed.anim_fps = std::clamp(ed.anim_fps, 1, 60);
@@ -1385,7 +1419,8 @@ void draw_dialogs(Editor& ed) {
             ImGui::DragFloat("Seconds", &ed.anim_seconds, 0.1f, 0.1f, 600.0f, "%.1f s");
         } else {
             ImGui::SetNextItemWidth(120);
-            ImGui::SliderInt("Cycles", &ed.anim_cycles, 1, 10);
+            ImGui::InputInt("Cycles", &ed.anim_cycles);
+            ed.anim_cycles = std::max(1, ed.anim_cycles);
             ImGui::TextDisabled("Renders %d eclipse loop(s) of %.0f s (regenerates each).",
                                 ed.anim_cycles, ed.scene_seconds);
         }
@@ -1402,6 +1437,14 @@ void draw_dialogs(Editor& ed) {
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(110, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Export error", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted(ed.export_error.c_str());
+        ImGui::Spacing();
+        if (ImGui::Button("OK", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 
@@ -1910,6 +1953,7 @@ void glfw_error_callback(int error, const char* description) {
 }  // namespace
 
 int main() {
+    signal(SIGPIPE, SIG_IGN);  // broken ffmpeg pipe gives EPIPE instead of crashing
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) return 1;
 
