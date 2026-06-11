@@ -1136,7 +1136,8 @@ void draw_generate_tab(Editor& ed) {
     if (ImGui::Checkbox("Infinite mode", &ed.infinite_mode)) {
         if (ed.infinite_mode) start_infinite(ed);
     }
-    ImGui::SliderFloat("Scene seconds", &ed.scene_seconds, 5.0f, 120.0f, "%.0f s");
+    ImGui::InputFloat("Scene seconds", &ed.scene_seconds, 1.0f, 10.0f, "%.2f s");
+    ed.scene_seconds = std::max(1.0f, ed.scene_seconds);
     ImGui::SetItemTooltip("How long each scene lasts. Fixed, so the motion speed is "
                           "the same in every scene. Applies from the next cycle.");
     ImGui::SliderInt("Camera loops", &ed.cam_loops, 1, 3);
